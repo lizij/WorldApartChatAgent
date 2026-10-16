@@ -7,6 +7,8 @@ const $$ = (s) => Array.from(document.querySelectorAll(s));
 let statusCache = null;
 let currentKind = 'all';
 let logPausedAdd = false;
+// 「AI 修改记忆」草稿：{ slug, prompt, text }；仅作前端预览态，保存/取消即清空
+let draftState = null;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -167,6 +169,10 @@ function renderLog(rec) {
   } else if (rec.kind === 'summary') {
     body = `<div class="log-line">${esc(rec.slug || '')} 记忆压缩 ${rec.status === 'done' ? '完成' : '失败'}</div>
       <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+  } else if (rec.kind === 'memory_edit') {
+    const act = rec.action === 'save' ? '保存记忆' : 'AI 改写记忆';
+    body = `<div class="log-line">${esc(rec.slug || '')} ${act} ${rec.status === 'done' ? '完成' : '失败'}</div>
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
   } else if (rec.kind === 'auth') {
     body = `<div class="log-line warn">鉴权失败：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
   } else {
@@ -251,6 +257,7 @@ async function loadNpcDetail(slug, name) {
   const d = await api('/api/npcs/' + encodeURIComponent(slug));
   const g = d.state?.lastGame || {};
   const st = d.style || { useGlobal: true, text: '' };
+  const hasDraft = !!draftState && draftState.slug === slug;
   const convs = d.conversations
     .slice()
     .reverse()
@@ -260,6 +267,16 @@ async function loadNpcDetail(slug, name) {
       return `<div class="conv-item ${c.role}"><div class="meta">${esc(who)} · ${esc(meta)}</div><div>${esc(c.content)}</div></div>`;
     })
     .join('');
+  const draftBlock = hasDraft
+    ? `
+    <label>草稿预览（可直接编辑；保存后用此内容覆盖记忆）</label>
+    <textarea id="memDraft" class="mem-draft" rows="14">${esc(draftState.text)}</textarea>
+    <div class="act-row">
+      <button class="btn sm" id="memCancel">取消</button>
+      <button class="btn primary sm" id="memSave">保存（自动备份）</button>
+    </div>
+    <p class="hint">保存前会先把当前记忆按时间戳备份到该 NPC 目录下的 <code>backups/</code>。</p>`
+    : '';
   $('#npcDetail').innerHTML = `
     <h3>${esc(name)} <span class="muted">${esc(slug)}</span></h3>
     <div class="log-meta">
@@ -271,6 +288,13 @@ async function loadNpcDetail(slug, name) {
     </div>
     <h4>长期记忆（注入模型的内容）</h4>
     <pre>${esc(d.memory.replace(/^#.*\n/, '').replace(/^>.*\n/g, '').trim() || '（暂无）')}</pre>
+    <h4>AI 修改记忆</h4>
+    <div class="mem-edit">
+      <label>一次性修改要求（交给当前上游模型按此指令改写上面的记忆，生成草稿）</label>
+      <textarea id="memEditPrompt" rows="4" placeholder="例如：删掉【未了之事】里已经了结的酒钱条目；并补上一条「她讨厌雨天」。">${esc(hasDraft ? draftState.prompt : '')}</textarea>
+      <div class="act-row"><span class="saved-hint" id="memStatus"></span><button class="btn sm" id="memRewrite">AI 生成草稿</button></div>
+      ${draftBlock}
+    </div>
     <h4>对话风格（本 NPC 专属，可结合上面的记忆来设定）</h4>
     <label class="check small"><input type="checkbox" id="npcStyleUseGlobal" ${st.useGlobal !== false ? 'checked' : ''} /> 叠加全局提示词（取消勾选则只用本 NPC 提示词）</label>
     <textarea id="npcStyleText" rows="4" placeholder="例如：性格更热情主动，会主动找话题寒暄；或更严肃寡言，只用短句……">${esc(st.text)}</textarea>
@@ -289,6 +313,54 @@ async function loadNpcDetail(slug, name) {
     flashSaved('npcStyleSaved', '已保存');
     loadNpcs();
   });
+
+  // AI 修改记忆：生成草稿
+  $('#memRewrite').addEventListener('click', async () => {
+    const status = $('#memStatus');
+    const prompt = $('#memEditPrompt').value.trim();
+    if (!prompt) {
+      status.textContent = '请先填写修改要求';
+      return;
+    }
+    const btn = $('#memRewrite');
+    btn.disabled = true;
+    status.textContent = '生成中…（调用上游模型）';
+    try {
+      const r = await api('/api/npcs/' + encodeURIComponent(slug) + '/memory/rewrite', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt }),
+      });
+      draftState = { slug, prompt, text: r.draft };
+      await loadNpcDetail(slug, name);
+    } catch (err) {
+      btn.disabled = false;
+      status.textContent = '生成失败：' + String(err.message || err);
+    }
+  });
+
+  if (hasDraft) {
+    $('#memSave').addEventListener('click', async () => {
+      const status = $('#memStatus');
+      status.textContent = '保存中…';
+      try {
+        const r = await api('/api/npcs/' + encodeURIComponent(slug) + '/memory', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: $('#memDraft').value }),
+        });
+        draftState = null;
+        await loadNpcDetail(slug, name);
+        $('#memStatus').textContent = '✓ 已保存并覆盖' + (r.backup ? '（备份：' + r.backup + '）' : '');
+      } catch (err) {
+        status.textContent = '保存失败：' + String(err.message || err);
+      }
+    });
+    $('#memCancel').addEventListener('click', () => {
+      draftState = null;
+      loadNpcDetail(slug, name);
+    });
+  }
 }
 
 // 初始化

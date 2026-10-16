@@ -109,6 +109,7 @@ textarea:focus { border-color: var(--accent); }
 .log-item.npc { border-left-color: var(--accent); }
 .log-item.compressor { border-left-color: var(--purple); }
 .log-item.summary { border-left-color: var(--cyan); }
+.log-item.memory_edit { border-left-color: var(--purple); }
 .log-item.probe { border-left-color: var(--muted); }
 .log-item.error, .log-item[data-status="error"], .log-item[data-status="upstream_error"] { border-left-color: var(--red); }
 .log-item.server { border-left-color: var(--yellow); }
@@ -119,6 +120,7 @@ textarea:focus { border-color: var(--accent); }
 .badge.npc { background: #34507e; }
 .badge.compressor { background: #5e4688; }
 .badge.summary { background: #2b6b70; }
+.badge.memory_edit { background: #6a4f7a; }
 .badge.probe { background: #555; }
 .badge.server, .badge.config, .badge.auth { background: #6b5a28; }
 .badge.err { background: #8a3a3a; }
@@ -155,3 +157,9 @@ textarea:focus { border-color: var(--accent); }
 .conv-item.npc { background: var(--panel2); border: 1px solid var(--border); }
 .conv-item .meta { color: var(--muted); font-size: 11px; margin-bottom: 2px; }
 .tag { display: inline-block; background: var(--panel2); border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; font-size: 11px; color: var(--muted); margin-left: 4px; }
+
+/* AI 修改记忆 */
+.mem-edit { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.mem-edit label { font-size: 12px; color: var(--muted); }
+.mem-edit .mem-draft { min-height: 180px; }
+.mem-edit code { background: var(--panel2); border-radius: 4px; padding: 0 4px; font-size: 11.5px; }

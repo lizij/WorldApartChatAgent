@@ -19,10 +19,13 @@ import {
   sessionIdOf,
   loadNpcStyle,
   saveNpcStyle,
+  backupMemory,
+  writeMemory,
   NPCS_DIR,
 } from './memory/store.js';
 import { injectMemory, injectStyle } from './memory/inject.js';
 import { Summarizer } from './memory/summarizer.js';
+import { MemoryRewriter } from './memory/rewriter.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, sendJsonError } from './upstream.js';
 import { KeyedQueue } from './locks.js';
@@ -31,6 +34,12 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 /** 对话风格提示词字数上限（全局与逐 NPC 同一上限；防止误粘贴超长文本挤占 token）。 */
 const STYLE_MAX_CHARS = 4000;
+
+/** 「AI 修改记忆」一次性指令上限（字）。 */
+const MEMORY_EDIT_MAX_CHARS = 4000;
+
+/** 手工保存记忆正文的上限（字）；防止误粘贴超长文本。 */
+const MEMORY_TEXT_MAX_CHARS = 200000;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -143,10 +152,28 @@ function strIn(v, maxLen) {
 export function createServer({ config, logger }) {
   const queues = new KeyedQueue();
   const summarizer = new Summarizer({ config, logger, queue: queues });
+  const rewriter = new MemoryRewriter({ config, queue: queues });
   const idleFlusher = new IdleFlusher({ config, logger, summarizer });
 
   function cfg() {
     return config.get();
+  }
+
+  /** 解析并校验 NPC slug → 目录；非法转义/越界/不存在时已回 404，返回 null。 */
+  function resolveNpcDir(res, slugRaw) {
+    let slug;
+    try {
+      slug = decodeURIComponent(slugRaw);
+    } catch {
+      sendJsonError(res, 404, 'not_found', 'NPC 不存在');
+      return null;
+    }
+    const dir = path.join(NPCS_DIR, slug);
+    if (!dir.startsWith(NPCS_DIR + path.sep) || !fs.existsSync(dir)) {
+      sendJsonError(res, 404, 'not_found', 'NPC 不存在');
+      return null;
+    }
+    return { slug, dir };
   }
 
   function authed(req) {
@@ -398,6 +425,95 @@ export function createServer({ config, logger }) {
     logger.append({ kind: 'config', status: 'updated', slug, styleChars: saved.text.length });
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(JSON.stringify({ ok: true, style: saved }));
+  }
+
+  // —— AI 修改记忆：一次性指令改写草稿 → 预览/编辑 → 备份后覆盖 ——
+
+  /** POST /api/npcs/:slug/memory/rewrite：按玩家指令用上游模型改写记忆，返回草稿（不落盘）。 */
+  async function handleRewriteMemory(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    const prompt = typeof body?.prompt === 'string' ? body.prompt.trim() : '';
+    if (!prompt) return sendJsonError(res, 400, 'bad_request', '修改要求（prompt）不能为空');
+    if (prompt.length > MEMORY_EDIT_MAX_CHARS) {
+      return sendJsonError(res, 400, 'bad_request', `修改要求过长（上限 ${MEMORY_EDIT_MAX_CHARS} 字）`);
+    }
+    if (!cfg().upstream.apiKey) {
+      return sendJsonError(res, 503, 'upstream_not_configured', '上游 API Key 未配置，请在管理页填写');
+    }
+    const { slug, dir } = hit;
+    const memoryFile = path.join(dir, 'memory.md');
+    let original = '';
+    try {
+      original = fs.readFileSync(memoryFile, 'utf8');
+    } catch {}
+    const started = Date.now();
+    try {
+      const { draft, durationMs } = await rewriter.rewrite(slug, memoryFile, prompt);
+      logger.append({
+        kind: 'memory_edit',
+        slug,
+        action: 'rewrite',
+        status: 'done',
+        durationMs,
+        promptChars: prompt.length,
+        generatedChars: draft.length,
+      });
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      res.end(JSON.stringify({ ok: true, slug, original, draft }));
+    } catch (err) {
+      logger.append({
+        kind: 'memory_edit',
+        slug,
+        action: 'rewrite',
+        status: 'error',
+        durationMs: Date.now() - started,
+        error: err?.message || String(err),
+      });
+      sendJsonError(res, 502, 'upstream_error', `AI 改写失败: ${err?.message || err}`);
+    }
+  }
+
+  /** PUT /api/npcs/:slug/memory：用草稿覆盖记忆；覆盖前按时间戳备份到 backups/。 */
+  async function handlePutMemory(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    if (!body || typeof body.text !== 'string') {
+      return sendJsonError(res, 400, 'bad_request', 'text 缺失或类型错误');
+    }
+    if (body.text.length > MEMORY_TEXT_MAX_CHARS) {
+      return sendJsonError(res, 400, 'bad_request', `记忆过长（上限 ${MEMORY_TEXT_MAX_CHARS} 字）`);
+    }
+    const { slug, dir } = hit;
+    const memoryFile = path.join(dir, 'memory.md');
+    let backup = null;
+    try {
+      // 与摘要器写 memory.md 用同一队列 key，避免覆盖与摘要写入交错
+      backup = await queues.run('summary:' + slug, () => {
+        const b = backupMemory(memoryFile, slug);
+        writeMemory(memoryFile, slug, body.text);
+        return b;
+      });
+    } catch (err) {
+      logger.append({ kind: 'memory_edit', slug, action: 'save', status: 'error', error: err?.message || String(err) });
+      return sendJsonError(res, 500, 'internal_error', `保存失败: ${err?.message || err}`);
+    }
+    const chars = body.text.trim().length;
+    logger.append({ kind: 'memory_edit', slug, action: 'save', status: 'done', memoryChars: chars, backup });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, backup, chars }));
   }
 
   function handleEvents(req, res) {
@@ -656,6 +772,10 @@ export function createServer({ config, logger }) {
         if (normPath === '/api/npcs' && req.method === 'GET') return handleNpcList(req, res);
         const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/style$/);
         if (ms && req.method === 'PUT') return await handlePutNpcStyle(req, res, ms[1]);
+        const mr = normPath.match(/^\/api\/npcs\/([^/]+)\/memory\/rewrite$/);
+        if (mr && req.method === 'POST') return await handleRewriteMemory(req, res, mr[1]);
+        const mp = normPath.match(/^\/api\/npcs\/([^/]+)\/memory$/);
+        if (mp && req.method === 'PUT') return await handlePutMemory(req, res, mp[1]);
         const m = normPath.match(/^\/api\/npcs\/([^/]+)$/);
         if (m && req.method === 'GET') return handleNpcDetail(req, res, m[1]);
         return sendJsonError(res, 404, 'not_found', '未知管理接口');

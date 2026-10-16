@@ -163,12 +163,13 @@ WorldApartProject/
 ```
 data/  或  data_test/
 ├─ config.json
-├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / config / server / auth
+├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / memory_edit / config / server / auth
 └─ npcs/<slug>/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
    ├─ style.json              # 该 NPC 专属对话风格 {useGlobal,text}（可选；回复前注入）
    ├─ conversations.jsonl     # 该 NPC 的完整会话历史（每轮玩家/NPC 各一条，只追加）
+   ├─ backups/memory-<时间戳>.md # 「AI 修改记忆」保存前的时间戳备份（全部保留，可手工回滚）
    └─ intake/<时间>.md         # system 原文快照（首见或内容变化时）
 ```
 
@@ -247,6 +248,8 @@ data/  或  data_test/
 - `GET /api/logs?limit=`：最近日志
 - `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、专属对话风格与最近对话
 - `PUT /api/npcs/:slug/style`：保存该 NPC 专属对话风格（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 style.json）
+- `POST /api/npcs/:slug/memory/rewrite`：按玩家一次性指令（`{prompt}`，上限 4000 字）用上游模型改写该 NPC 长期记忆，返回草稿 `{original,draft}`（**不落盘**；上游未配 Key 返 503）
+- `PUT /api/npcs/:slug/memory`：用草稿（`{text}`）覆盖该 NPC `memory.md`；覆盖前按时间戳备份到 `npcs/<slug>/backups/`，返回备份文件名
 - 游戏侧：`POST /v1/chat/completions`、`GET /v1/models`（需 API Key）；`GET /health` 免鉴权
 
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、

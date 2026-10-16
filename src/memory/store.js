@@ -130,6 +130,25 @@ export function writeMemory(memoryFile, slug, body) {
   fs.writeFileSync(memoryFile, text, 'utf8');
 }
 
+/**
+ * 按时间戳备份当前长期记忆：data/npcs/<slug>/backups/memory-YYYYMMDD-HHMMSS.md。
+ * 用于「AI 修改记忆」保存前留底（玩家可手工回滚）。文件不存在时返回 null。
+ * @returns {string|null} 相对 NPC 目录的备份路径，如 backups/memory-20261017-153012.md
+ */
+export function backupMemory(memoryFile, slug) {
+  if (!fs.existsSync(memoryFile)) return null;
+  const d = new Date();
+  const name = `memory-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
+    d.getDate(),
+  ).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(
+    d.getMinutes(),
+  ).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}.md`;
+  const dir = path.join(path.dirname(memoryFile), 'backups');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(memoryFile, path.join(dir, name));
+  return `backups/${name}`;
+}
+
 // —— 逐 NPC 对话风格（玩家设定，独立于长期记忆）——
 // data/npcs/<slug>/style.json = { useGlobal: boolean, text: string }
 //   text      该 NPC 的专属风格提示词（为空表示不设专属风格）
