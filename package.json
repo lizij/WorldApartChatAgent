@@ -1,6 +1,6 @@
 {
   "name": "worldapart-npc-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "《不问凡尘》外置 AI NPC 对话 Agent：OpenAI 兼容本地 Provider + 按 NPC 隔离的轻量级记忆层 + 桌面控制台",
   "type": "module",

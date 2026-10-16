@@ -149,7 +149,7 @@ export class Summarizer {
       const recent = recentConversations(bundle.convFile, cfg.recentEntries);
       const dialogue = recent
         .map((e) => {
-          const who = e.role === 'player' ? '玩家 Wind' : slug;
+          const who = e.role === 'player' ? '玩家' : slug;
           const meta = e.game_time ? `（${e.game_time}${e.scene ? '·' + e.scene : ''}）` : '';
           return `[${who}]${meta} ${e.content}`;
         })

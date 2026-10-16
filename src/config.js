@@ -1,8 +1,8 @@
 /**
- * 配置：默认值、深合并、首启迁移、热更新持久化、路径解析。
+ * 配置：默认值、深合并、热更新持久化、路径解析。
  *
  * 数据/静态目录在 Electron 打包后由环境变量注入（import.meta.url 在 asar 内的
- * CJS 单文件包里不可靠，与 LocalAIProxy 同样的处理）：
+ * CJS 单文件包里不可靠，因此一律走环境变量）：
  *   WFC_HOME        数据目录（便携版 = exe 同级 data/ 或 data_test/）
  *   WFC_PUBLIC_DIR  静态页面目录（便携版 = resources/public）
  *   WFC_VERSION     版本号（便携版由主进程注入）
@@ -63,8 +63,8 @@ export function defaults() {
       insecureTLS: false,
       // 默认【不干涉】上游思考链：游戏原始请求从不带 thinking 参数，因此保持不注入，
       // 让上游用默认行为（deepseek-flash 默认开思考）。
-      // 实测（2026-10-16）：强制禁用思考会让 NPC 忽略 system 里的复杂规则
-      // （如「最高优先级规则」「承认对方提到的一切」），表现为只按眼前一句话回复；
+      // 实测（2026-10-16）：强制禁用思考会让 NPC 忽略 system 里下发的复杂约束，
+      // 表现为只按眼前一句话回复；
       // 开启思考才与裸模型行为一致。仅当确需压低延迟时才把它改成 true。
       disableThinking: false,
       connectTimeoutMs: 15000,
@@ -100,7 +100,6 @@ export function defaults() {
       memorySize: 1000,
       maxDays: 14,
     },
-    migrateFromLocalAIProxy: true,
   };
 }
 
@@ -118,32 +117,6 @@ export function deepMerge(base, override) {
   return out;
 }
 
-/** 一次性迁移：从本机 LocalAIProxy 便携版读取生效 Provider（仅首启、Key 为空时）。 */
-function tryMigrateUpstream() {
-  const candidates = [
-    process.env.WFC_IMPORT_CONFIG,
-    'C:\\Users\\lizij\\Downloads\\LocalAIProxy\\releases\\data\\config.json',
-  ].filter(Boolean);
-
-  for (const file of candidates) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-      const providers = Array.isArray(raw.providers) ? raw.providers : [];
-      const active = providers.find((p) => p && p.id === raw.activeProviderId) || providers[0];
-      if (active && active.baseUrl && active.apiKey) {
-        return {
-          baseUrl: active.baseUrl,
-          apiKey: String(active.apiKey),
-          model: active.model || 'deepseek-flash',
-          insecureTLS: !!active.insecureTLS,
-          migratedFrom: file,
-        };
-      }
-    } catch {}
-  }
-  return null;
-}
-
 /**
  * 配置仓库：启动时加载/生成，运行期可热更新（管理页保存后即时生效）。
  */
@@ -153,20 +126,10 @@ export class ConfigStore {
     const d = defaults();
     let user = {};
     let existed = false;
-    this.migrated = null;
     try {
       user = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
       existed = true;
     } catch {}
-
-    if (!existed && d.migrateFromLocalAIProxy) {
-      const m = tryMigrateUpstream();
-      if (m) {
-        const { migratedFrom, ...up } = m;
-        Object.assign(d.upstream, up);
-        this.migrated = migratedFrom;
-      }
-    }
 
     this.cfg = deepMerge(d, user);
     this.firstRun = !existed;

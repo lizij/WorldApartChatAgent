@@ -191,7 +191,6 @@ export function createServer({ config, logger }) {
         },
         memory: c.memory,
         log: c.log,
-        migrated: config.migrated || null,
       }),
     );
   }

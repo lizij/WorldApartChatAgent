@@ -40,8 +40,8 @@ const ILLEGAL_FS_CHARS = /[\\/:*?"<>|~]/g;
 
 /**
  * 归一化 NPC 目录名（slug）：
- *  - 去品阶前缀（纱影·/奈宝·/奈玲·）
- *  - 去心境波浪号后缀（李清月~静 → 李清月），变体通过 variant 返回
+ *  - 去品阶/外观前缀（形如「前缀·名字」）
+ *  - 去心境波浪号后缀（形如「名字~心境」→「名字」），变体通过 variant 返回
  *  - 去括号身份、尾随独立数字
  */
 export function slugify(rawName) {
@@ -53,12 +53,12 @@ export function slugify(rawName) {
     name = tilde[1].trim();
     variant = tilde[2].trim();
   }
-  // 品阶前缀：第一个 · 之前的部分（如「纱影·李清月」）
+  // 品阶/外观前缀：第一个 · 之前的部分（如「前缀·名字」）
   const dot = name.indexOf('·');
   if (dot >= 0) name = name.slice(dot + 1);
   // 括号身份
   name = name.replace(/[（(].*$/, '');
-  // 尾随独立变体数字（章籽梦 3）
+  // 尾随独立变体数字（形如「名字 3」）
   name = name.replace(/\s+\d+\s*$/, '');
   name = name.trim().replace(ILLEGAL_FS_CHARS, '').trim();
   return { slug: name, variant };
@@ -73,12 +73,12 @@ function section(text, title) {
  * 用「角色背景」把 mod 全名校正回**原名**。
  *
  * 背景：游戏装了 mod 后 NPC 全名会变（不同 mod 全名不同，但**都包含原名**）。
- * 实测请求里 `## 角色设定` 是 `奈宝·念乔2`，而 `## 角色背景` 以原名开篇：
- * `念乔是在归鹤镇一带活跃的散修…`。所以可用背景做锚，把尾随的 mod 编号剥掉。
+ * 实测请求里 `## 角色设定` 是「前缀·名字+编号」，而 `## 角色背景` 以原名开篇：
+ * 「名字……」。所以可用背景做锚，把尾随的 mod 编号剥掉。
  *
  * 规则（只在 base 含数字时才尝试，避免对普通名字做无谓改动）：
- *   ① 背景里出现过**完整** base → 说明数字确实是名字的一部分（如真名「小二」）→ 原样保留
- *   ② 否则取 base 的**最长前缀**使其能作为背景的开头 → `念乔2` → `念乔`
+ *   ① 背景里出现过**完整** base → 说明数字确实是名字的一部分 → 原样保留
+ *   ② 否则取 base 的**最长前缀**使其能作为背景的开头 →「名字+编号」→「名字」
  *   ③ 再退一步：取在背景中**出现过**的最长前缀（背景没以名字开头时仍能救回）
  *   ④ 都不成立 → 保留 base
  */
@@ -121,9 +121,8 @@ export function extractGameState(sys) {
     s.scene = null;
   }
 
-  // **随身之物** 在 system 里出现两次：「赠物通则」那处是规则说明（"玩家问起你有什么时，
-  // 照末尾「随身之物」列的说…"），「当前场景」那处才是真物品清单（"你身上带着「…」"）。
-  // 取最后一条含「/× 的匹配，避免把规则说明当成随身之物。
+  // 「随身之物」这个字段在 system 里会出现两次：一处是**规则说明**（讲这份清单怎么用），
+  // 一处才是**真实清单**。取最后一条带物品标记（「 或 ×）的匹配，避免把规则说明当成清单。
   const belongingsLines = [...sys.matchAll(/^[ \t]*\*\*随身之物\*\*[：:][ \t]*([^\r\n]+)$/gm)].map((x) => x[1].trim());
   s.belongings = (() => {
     if (!belongingsLines.length) return null;
@@ -171,13 +170,12 @@ export function classify(body) {
   // 两个必须同时满足的约束：
   //   ① 换行必须写成 \r?\n —— 只写 \n 会因前面的 \r 匹配失败，导致所有具名 NPC 被误判为无名；
   //   ② 名字用 [^\r\n]* 并锚定行尾 —— 否则名字为空时会把下一行（如 `## 角色背景`）当成名字。
-  // 不能放宽成「可跨多个空行」：那样 `你是主动方，不要干等玩家打字。`（对话推进准则里的说明句）
-  // 也可能被当成角色名。
+  // 不能放宽成「可跨多个空行」：那样 system 正文里的普通说明句也可能被当成角色名。
   const m = sys.match(/^[ \t]*##[ \t]*角色设定[ \t]*\r?\n[ \t]*你是[ \t]*([^\r\n]*)$/m);
   if (m) {
     const rawName = m[1].trim();
     const { slug: base, variant } = slugify(rawName);
-    // 装了 mod 的 NPC 全名会变（如 `奈宝·念乔2`），用「角色背景」校正回原名（`念乔`）
+    // 装了 mod 的 NPC 全名会变，用「角色背景」校正回原名
     const slug = originalNameOf(base, section(sys, '角色背景'));
     // 名字为空或形如标题行（以 # 开头）时，视为无名 NPC，走场景兜底分支
     if (slug && !slug.startsWith('#')) {
@@ -195,7 +193,7 @@ export function classify(body) {
   }
 
   if (isGameTemplate) {
-    // 有名有姓缺失（如无名商贩）：以场景兜底，保证记忆仍可隔离
+    // 角色名为空（无名 NPC）：以场景兜底，保证记忆仍可隔离
     const st = extractGameState(sys);
     const key = st.scene ? st.scene : '未命名';
     return {

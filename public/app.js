@@ -240,7 +240,7 @@ async function loadNpcDetail(slug, name) {
     .slice()
     .reverse()
     .map((c) => {
-      const who = c.role === 'player' ? '玩家 Wind' : esc(name);
+      const who = c.role === 'player' ? '玩家' : esc(name);
       const meta = [c.game_time, c.scene, c.emotion, c.control, c.reply_json_ok === false ? '⚠非JSON' : null].filter(Boolean).join(' · ');
       return `<div class="conv-item ${c.role}"><div class="meta">${esc(who)} · ${esc(meta)}</div><div>${esc(c.content)}</div></div>`;
     })

@@ -24,9 +24,7 @@ app
       `上游 Provider : ${cfg.upstream.baseUrl}  →  ${cfg.upstream.model}`,
       !cfg.upstream.apiKey
         ? '⚠ 上游 API Key 未配置：请打开管理页或编辑 ' + cfg.dataDir + '\\config.json'
-        : app.config.migrated
-          ? '已从 LocalAIProxy 配置迁移上游 Key：' + app.config.migrated
-          : '',
+        : '',
       '管理页 : http://' + cfg.server.host + ':' + cfg.server.port + '/',
       '数据目录 : ' + cfg.dataDir,
       '',
@@ -43,7 +41,6 @@ app
       host: cfg.server.host,
       port: cfg.server.port,
       firstRun: app.config.firstRun,
-      migratedUpstream: !!app.config.migrated,
     });
   })
   .catch((err) => {
