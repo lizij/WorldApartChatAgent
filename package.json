@@ -1,0 +1,58 @@
+{
+  "name": "worldapart-npc-agent",
+  "version": "0.2.0",
+  "private": true,
+  "description": "《不问凡尘》外置 AI NPC 对话 Agent：OpenAI 兼容本地 Provider + 按 NPC 隔离的轻量级记忆层 + 桌面控制台",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:test": "node src/index.js --test",
+    "build:backend": "node scripts/build-backend.mjs",
+    "dev:desktop": "npm run build:backend && electron .",
+    "dist:win": "node scripts/dist.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "build": {
+    "appId": "com.worldapart.npcagent",
+    "productName": "WorldApartNpcAgent",
+    "asar": true,
+    "directories": {
+      "output": "releases",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/backend.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public",
+        "to": "public"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "WorldApartNpcAgent-${version}-win-portable.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "44.6.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

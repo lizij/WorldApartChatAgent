@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>不问凡尘 · NPC Agent 控制台</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">仙</span>
+    <div>
+      <h1>不问凡尘 · 外置 NPC Agent</h1>
+      <span class="ver" id="version">v-</span>
+    </div>
+  </div>
+  <div class="conn-state" id="connState"><span class="dot"></span>连接中…</div>
+</header>
+
+<nav class="tabs">
+  <button class="tab active" data-tab="dashboard">概览与配置</button>
+  <button class="tab" data-tab="logs">执行日志</button>
+  <button class="tab" data-tab="npcs">NPC 记忆</button>
+</nav>
+
+<main>
+  <!-- 概览 -->
+  <section id="tab-dashboard" class="tab-pane active">
+    <div class="grid two">
+      <div class="card">
+        <h2>游戏连接信息</h2>
+        <div class="kv">
+          <label>Base URL</label>
+          <div class="row"><input id="baseUrl" readonly /><button class="btn sm" data-copy="baseUrl">复制</button></div>
+          <label>API Key</label>
+          <div class="row"><input id="apiKey" readonly /><button class="btn sm" data-copy="apiKey">复制</button></div>
+          <label>Model ID</label>
+          <div class="row"><input id="servedModelView" readonly /></div>
+          <label>数据目录（测试档为 data_test/）</label>
+          <div class="row"><input id="dataDirView" readonly /></div>
+          <p class="hint">在游戏的自定义 OpenAI 接口中填写以上三项；游戏传入任意模型名都会被映射到下方上游模型。</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>上游 Provider</h2>
+        <div class="kv">
+          <label>Base URL</label>
+          <input id="upBaseUrl" placeholder="https://api.deepseek.com" />
+          <label>模型</label>
+          <input id="upModel" placeholder="deepseek-flash" />
+          <label>API Key（留空保存表示不修改）</label>
+          <input id="upApiKey" type="password" placeholder="••••••••" autocomplete="off" />
+          <label class="check"><input type="checkbox" id="upDisableThinking" /> 禁用思考链（thinking:disabled，最低延迟）</label>
+          <div class="row right"><button class="btn primary" id="saveUpstream">保存上游配置</button></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>记忆设置</h2>
+      <div class="grid three">
+        <label class="check"><input type="checkbox" id="memEnabled" /> 启用外置记忆</label>
+        <label class="check"><input type="checkbox" id="memSnapshot" /> 存档 system 原文</label>
+        <label class="check"><input type="checkbox" id="sumEnabled" /> 启用异步记忆压缩</label>
+        <label>注入记忆字符上限<input type="number" id="memInjectChars" min="200" step="100" /></label>
+        <label>每 N 轮压缩一次<input type="number" id="sumEvery" min="1" step="1" /></label>
+        <label>压缩记忆上限（字）<input type="number" id="sumMaxChars" min="100" step="50" /></label>
+      </div>
+      <div class="row right"><button class="btn primary" id="saveMemory">保存记忆设置</button><span class="saved-hint" id="memSaved"></span></div>
+    </div>
+  </section>
+
+  <!-- 日志 -->
+  <section id="tab-logs" class="tab-pane">
+    <div class="card log-card">
+      <div class="log-toolbar">
+        <div class="filters" id="kindFilters">
+          <button class="chip active" data-kind="all">全部</button>
+          <button class="chip" data-kind="npc">NPC 对话</button>
+          <button class="chip" data-kind="compressor">压缩器</button>
+          <button class="chip" data-kind="summary">记忆压缩</button>
+          <button class="chip" data-kind="probe">探测</button>
+          <button class="chip" data-kind="error-only">仅异常</button>
+        </div>
+        <label class="check small"><input type="checkbox" id="autoScroll" checked /> 自动滚动</label>
+        <button class="btn sm" id="clearLogView">清空视图</button>
+      </div>
+      <div id="logList" class="log-list"></div>
+    </div>
+  </section>
+
+  <!-- NPC -->
+  <section id="tab-npcs" class="tab-pane">
+    <div class="grid npc-grid">
+      <div class="card npc-list-card">
+        <h2>NPC 名录 <span class="muted" id="npcCount"></span></h2>
+        <div id="npcList" class="npc-list"></div>
+      </div>
+      <div class="card npc-detail-card">
+        <div id="npcDetail" class="npc-detail">
+          <p class="hint">选择左侧 NPC 查看其长期记忆与最近对话。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
