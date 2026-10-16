@@ -49,6 +49,8 @@ async function loadConfig() {
   $('#memInjectChars').value = c.memory.injectMaxChars;
   $('#sumEvery').value = c.memory.summarizer.everyTurns;
   $('#sumMaxChars').value = c.memory.summarizer.maxMemoryChars;
+  $('#styleEnabled').checked = !!c.style?.enabled;
+  $('#styleGlobal').value = c.style?.global || '';
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -86,6 +88,17 @@ $('#saveMemory').addEventListener('click', async () => {
     }),
   });
   flashSaved('memSaved', '记忆设置已保存');
+});
+
+$('#saveStyle').addEventListener('click', async () => {
+  await api('/api/config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      style: { enabled: $('#styleEnabled').checked, global: $('#styleGlobal').value },
+    }),
+  });
+  flashSaved('styleSaved', '风格设置已保存');
 });
 
 function flashSaved(id, text) {
@@ -144,6 +157,7 @@ function renderLog(rec) {
           ${rec.slug ? `<span class="log-slug">${esc(rec.slug)}</span>${rec.variant ? `<span class="tag">变体 ${esc(rec.variant)}</span>` : ''}` : ''}
           ${rec.isNewNpc ? '<span class="tag">新建档</span>' : ''}
           ${rec.injectChars ? `<span>注入记忆 ${rec.injectChars} 字</span>` : ''}
+          ${rec.styleChars ? `<span>风格提示 ${rec.styleChars} 字</span>` : ''}
           ${timing.map((x) => `<span>${x}</span>`).join('')}
           ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
         </div>`;
@@ -222,7 +236,7 @@ async function loadNpcs() {
     const name = n.rawNames[0] || n.slug;
     const g = n.lastGame || {};
     div.innerHTML = `
-      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}</div>
+      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.styleChars ? '<span class="tag">专属风格</span>' : ''}</div>
       <div class="sub">${n.turns} 轮 · ${g.relation ? esc(g.relation) + ' · ' : ''}${g.scene ? esc(g.scene) : ''} · ${new Date(n.lastSeen).toLocaleString('zh-CN', { hour12: false })}</div>`;
     div.addEventListener('click', () => {
       $$('.npc-item').forEach((x) => x.classList.remove('active'));
@@ -236,6 +250,7 @@ async function loadNpcs() {
 async function loadNpcDetail(slug, name) {
   const d = await api('/api/npcs/' + encodeURIComponent(slug));
   const g = d.state?.lastGame || {};
+  const st = d.style || { useGlobal: true, text: '' };
   const convs = d.conversations
     .slice()
     .reverse()
@@ -256,8 +271,24 @@ async function loadNpcDetail(slug, name) {
     </div>
     <h4>长期记忆（注入模型的内容）</h4>
     <pre>${esc(d.memory.replace(/^#.*\n/, '').replace(/^>.*\n/g, '').trim() || '（暂无）')}</pre>
+    <h4>对话风格（本 NPC 专属，可结合上面的记忆来设定）</h4>
+    <label class="check small"><input type="checkbox" id="npcStyleUseGlobal" ${st.useGlobal !== false ? 'checked' : ''} /> 叠加全局提示词（取消勾选则只用本 NPC 提示词）</label>
+    <textarea id="npcStyleText" rows="4" placeholder="例如：性格更热情主动，会主动找话题寒暄；或更严肃寡言，只用短句……">${esc(st.text)}</textarea>
+    <div class="act-row"><button class="btn primary sm" id="saveNpcStyle">保存本 NPC 风格</button><span class="saved-hint" id="npcStyleSaved"></span></div>
     <h4>最近对话（最新在上）</h4>
     ${convs || '<p class="hint">暂无对话。</p>'}`;
+  $('#saveNpcStyle').addEventListener('click', async () => {
+    await api('/api/npcs/' + encodeURIComponent(slug) + '/style', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        useGlobal: $('#npcStyleUseGlobal').checked,
+        text: $('#npcStyleText').value,
+      }),
+    });
+    flashSaved('npcStyleSaved', '已保存');
+    loadNpcs();
+  });
 }
 
 // 初始化

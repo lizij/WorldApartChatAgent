@@ -70,6 +70,14 @@ input[type="text"], input:not([type]), input[type="password"], input[type="numbe
 }
 input:focus { border-color: var(--accent); }
 input[readonly] { color: var(--muted); }
+textarea {
+  width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 7px 10px; font-size: 13px; outline: none; resize: vertical;
+  font-family: inherit; line-height: 1.5;
+}
+textarea:focus { border-color: var(--accent); }
+.kv textarea { margin-top: 2px; }
+.act-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
 .check.small { font-size: 12px; color: var(--muted); }
 .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }

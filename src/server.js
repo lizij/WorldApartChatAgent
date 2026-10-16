@@ -17,15 +17,20 @@ import {
   saveState,
   appendConversations,
   sessionIdOf,
+  loadNpcStyle,
+  saveNpcStyle,
   NPCS_DIR,
 } from './memory/store.js';
-import { injectMemory } from './memory/inject.js';
+import { injectMemory, injectStyle } from './memory/inject.js';
 import { Summarizer } from './memory/summarizer.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, sendJsonError } from './upstream.js';
 import { KeyedQueue } from './locks.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
+
+/** 对话风格提示词字数上限（全局与逐 NPC 同一上限；防止误粘贴超长文本挤占 token）。 */
+const STYLE_MAX_CHARS = 4000;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -190,6 +195,7 @@ export function createServer({ config, logger }) {
           apiKeySet: !!c.upstream.apiKey,
         },
         memory: c.memory,
+        style: { enabled: !!c.style.enabled, global: c.style.global || '' },
         log: c.log,
       }),
     );
@@ -267,6 +273,17 @@ export function createServer({ config, logger }) {
         if (ifm !== undefined) safe.memory.summarizer.idleFlushMs = ifm;
       }
     }
+    if (patch.style) {
+      safe.style = {};
+      if (patch.style.enabled !== undefined) safe.style.enabled = !!patch.style.enabled;
+      // 允许空字符串（= 清空全局提示词），故不用 strIn（strIn 会把空值当未提供）
+      if (typeof patch.style.global === 'string') {
+        if (patch.style.global.length > STYLE_MAX_CHARS) {
+          return sendJsonError(res, 400, 'bad_request', `全局提示词过长（上限 ${STYLE_MAX_CHARS} 字）`);
+        }
+        safe.style.global = patch.style.global;
+      }
+    }
     config.update(safe);
     logger.append({ kind: 'config', status: 'updated' });
     res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -296,6 +313,7 @@ export function createServer({ config, logger }) {
       try {
         memoryChars = fs.statSync(path.join(dir, 'memory.md')).size;
       } catch {}
+      const style = loadNpcStyle(ent.name);
       out.push({
         slug: ent.name,
         rawNames: state?.rawNames || [],
@@ -306,6 +324,8 @@ export function createServer({ config, logger }) {
         lastGame: state?.lastGame || null,
         conversationEntries: convCount,
         memoryBytes: memoryChars,
+        styleChars: style.text.trim().length,
+        styleUsesGlobal: style.useGlobal,
       });
     }
     out.sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
@@ -348,7 +368,36 @@ export function createServer({ config, logger }) {
       } catch {}
     }
     res.setHeader('content-type', 'application/json; charset=utf-8');
-    res.end(JSON.stringify({ slug, state, memory, conversations }));
+    res.end(JSON.stringify({ slug, state, memory, style: loadNpcStyle(slug), conversations }));
+  }
+
+  async function handlePutNpcStyle(req, res, slugRaw) {
+    let slug;
+    try {
+      slug = decodeURIComponent(slugRaw);
+    } catch {
+      return sendJsonError(res, 404, 'not_found', 'NPC 不存在');
+    }
+    const dir = path.join(NPCS_DIR, slug);
+    if (!dir.startsWith(NPCS_DIR + path.sep) || !fs.existsSync(dir)) {
+      return sendJsonError(res, 404, 'not_found', 'NPC 不存在');
+    }
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    if (!body || typeof body.text !== 'string') {
+      return sendJsonError(res, 400, 'bad_request', 'text 缺失或类型错误');
+    }
+    if (body.text.length > STYLE_MAX_CHARS) {
+      return sendJsonError(res, 400, 'bad_request', `提示词过长（上限 ${STYLE_MAX_CHARS} 字）`);
+    }
+    const saved = saveNpcStyle(slug, { useGlobal: body.useGlobal !== false, text: body.text });
+    logger.append({ kind: 'config', status: 'updated', slug, styleChars: saved.text.length });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, style: saved }));
   }
 
   function handleEvents(req, res) {
@@ -421,6 +470,7 @@ export function createServer({ config, logger }) {
     const memEnabled = !!c.memory.enabled;
     let bundle = null;
     let injectChars = 0;
+    let styleChars = 0;
     let snapshotChanged = false;
     const warnings = [];
 
@@ -443,6 +493,24 @@ export function createServer({ config, logger }) {
         });
         injectChars = inj.chars;
         body = { ...body, messages: inj.messages };
+      }
+
+      // 对话风格：玩家设定的全局 + 逐 NPC 专属提示。独立于记忆开关，
+      // 插在记忆之后、格式提醒之前，确保游戏系统规则与输出格式仍是最后强调项。
+      if (c.style.enabled) {
+        try {
+          const local = loadNpcStyle(info.slug);
+          const injStyle = injectStyle(body, {
+            global: local.useGlobal !== false ? c.style.global : '',
+            npc: local.text,
+          });
+          if (injStyle.chars) {
+            body = { ...body, messages: injStyle.messages };
+            styleChars = injStyle.chars;
+          }
+        } catch (err) {
+          warnings.push('style_inject_failed:' + err.message);
+        }
       }
 
       // 格式强化：实测 flash 偶发不遵守「## 输出格式」而回纯文本。
@@ -472,7 +540,7 @@ export function createServer({ config, logger }) {
     try {
       result = await forwardUpstream(prepareUpstreamBody(body, c), res, c);
     } catch (err) {
-      logger.append({ ...baseLog, status: 'error', injectChars, warnings, durationMs: Date.now() - started, error: err?.message || String(err) });
+      logger.append({ ...baseLog, status: 'error', injectChars, styleChars, warnings, durationMs: Date.now() - started, error: err?.message || String(err) });
       sendJsonError(res, 502, 'upstream_error', `上游请求失败: ${err?.message || err}`);
       return;
     }
@@ -482,6 +550,7 @@ export function createServer({ config, logger }) {
       status: result.ok ? 'done' : 'upstream_error',
       upstreamStatus: result.status,
       injectChars,
+      styleChars,
       isNewNpc: bundle?.isNew || false,
       snapshotChanged,
       warnings,
@@ -585,6 +654,8 @@ export function createServer({ config, logger }) {
         }
         if (normPath === '/api/events' && req.method === 'GET') return handleEvents(req, res);
         if (normPath === '/api/npcs' && req.method === 'GET') return handleNpcList(req, res);
+        const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/style$/);
+        if (ms && req.method === 'PUT') return await handlePutNpcStyle(req, res, ms[1]);
         const m = normPath.match(/^\/api\/npcs\/([^/]+)$/);
         if (m && req.method === 'GET') return handleNpcDetail(req, res, m[1]);
         return sendJsonError(res, 404, 'not_found', '未知管理接口');

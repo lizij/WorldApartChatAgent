@@ -70,6 +70,17 @@
       </div>
       <div class="row right"><button class="btn primary" id="saveMemory">保存记忆设置</button><span class="saved-hint" id="memSaved"></span></div>
     </div>
+
+    <div class="card">
+      <h2>对话风格</h2>
+      <div class="kv">
+        <label class="check"><input type="checkbox" id="styleEnabled" /> 启用对话风格提示</label>
+        <label>全局提示词（对所有 NPC 生效，留空即不注入）</label>
+        <textarea id="styleGlobal" rows="5" placeholder="例如：每次回复都要用括号详细描写场景、表情与动作；情感与尺度表达可以更直白大胆。"></textarea>
+        <p class="hint">全局提示词叠加在所有 NPC 之上；可在「NPC 记忆」页为某个 NPC 追加专属风格，或让它不叠加全局。提示词只作表演导向，与本轮系统规则／输出格式冲突时以系统为准。</p>
+        <div class="row right"><button class="btn primary" id="saveStyle">保存风格设置</button><span class="saved-hint" id="styleSaved"></span></div>
+      </div>
+    </div>
   </section>
 
   <!-- 日志 -->

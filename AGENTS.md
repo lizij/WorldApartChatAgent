@@ -35,7 +35,8 @@
    ① Key 鉴权
    ② 确定性分类：NPC 对话 / 对话记忆压缩器 / 探测
    ③ NPC 对话：正则解析「## 角色设定 你是 XXX」→ 稳定 slug + sessionId
-   ④ 读 data/npcs/<slug>/memory.md，作为一条 system 注入
+   ④ 读 data/npcs/<slug>/memory.md 与该 NPC 的 style.json，作为 system 注入
+      （长期记忆 + 对话风格提示；风格独立于记忆开关，插在记忆之后、输出格式提醒之前）
    ⑤ 模型名映射 + thinking:{type:"disabled"} + 输出格式强化提醒 → 转发上游
    ⑥ SSE 真流式原样回传游戏（不缓冲），旁路 Tee 解析回复文本
    ⑦ 响应结束后异步（不阻塞玩家）：
@@ -58,6 +59,11 @@
   游戏在 system 里下发的复杂约束（世界观规则等），只按眼前一句话回复；开启思考才与裸模型一致。
   确需低延迟时再开 `upstream.disableThinking`。
 - **隔离**：请求间无状态，每个 NPC 独立 slug / sessionId / 数据目录，不存在会话串扰。
+- **对话风格**：玩家可设**全局提示词**（对所有 NPC 生效）与**逐 NPC 专属提示词**
+  （`data/npcs/<slug>/style.json = {useGlobal, text}`）。二者合为一条 system，插在最后一条
+  user 前（记忆之后、输出格式提醒之前），**独立于记忆开关**，首轮即生效。
+  提示词只作表演导向，明确"与本轮系统规则／输出格式冲突时以系统为准"，不覆盖游戏下发的 system。
+  逐 NPC 可勾选"不叠加全局"（让某角色豁免全局尺度，或干脆不注入风格）。全局与逐 NPC 各限 4000 字。
 - **降级**：记忆层任何异常都退化为纯透传（warnings 落日志）；摘要失败只记日志；
   上游错误返回标准错误 JSON。
 
@@ -112,6 +118,8 @@
 | `memory.summarizer.everyTurns` | 每多少轮异步压缩一次（默认 4） |
 | `memory.summarizer.idleFlushEnabled/idleFlushMs` | 空闲兜底：默认开；`idleFlushMs` 默认 5 分钟无请求即视为本段会话结束并补压（扫描周期固定 5 秒，不做配置项以免"改了不生效"） |
 | `memory.summarizer.recentEntries/maxMemoryChars/maxTokens/timeoutMs/overLimitRetries` | 喂给摘要器的近期对话条数（40）/ 记忆字数上限（3000）/ 摘要调用 max_tokens（2500）/ 超时（90s）/ 超限重试次数（2，0~3） |
+| `style.enabled` | 对话风格提示总开关（默认 `true`）；关闭后全局与逐 NPC 提示都不注入 |
+| `style.global` | 全局对话风格提示词（对所有 NPC 生效，留空不注入；上限 4000 字）。逐 NPC 专属提示与「是否叠加全局」存于 `data/npcs/<slug>/style.json` |
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
 > 故有效上限 ≈ `maxTokens × 1.4`。上限若超过这个值，模型物理上写不出那么长——
@@ -142,8 +150,8 @@ WorldApartProject/
 │  ├─ locks.js                # 按 NPC 串行队列
 │  ├─ log.js                  # 环形缓冲（SSE 推送）+ 按天 JSONL
 │  └─ memory/
-│     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照
-│     ├─ inject.js            # 长期记忆注入消息组装
+│     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照、逐 NPC 对话风格
+│     ├─ inject.js            # 长期记忆 / 对话风格注入消息组装
 │     └─ summarizer.js        # 异步长期记忆压缩
 ├─ dist/backend.cjs           # 构建产物（gitignore）
 └─ releases/                  # portable exe 与其同级 data/、data_test/（gitignore）
@@ -159,6 +167,7 @@ data/  或  data_test/
 └─ npcs/<slug>/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
+   ├─ style.json              # 该 NPC 专属对话风格 {useGlobal,text}（可选；回复前注入）
    ├─ conversations.jsonl     # 该 NPC 的完整会话历史（每轮玩家/NPC 各一条，只追加）
    └─ intake/<时间>.md         # system 原文快照（首见或内容变化时）
 ```
@@ -223,18 +232,19 @@ data/  或  data_test/
 ## 5. 管理接口（仅本机，无需游戏 Key）
 
 - `GET /api/status`：连接信息、上游状态、记忆开关
-- `GET/PUT /api/config`：查看/保存配置（上游 Key 掩码显示，留空不修改；保存即时生效）
+- `GET/PUT /api/config`：查看/保存配置（上游 Key 掩码显示，留空不修改；保存即时生效；含 `style.enabled/global`）
 - `GET /api/events`：SSE，实时推送每条运行日志
 - `GET /api/logs?limit=`：最近日志
-- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆与最近对话
+- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、专属对话风格与最近对话
+- `PUT /api/npcs/:slug/style`：保存该 NPC 专属对话风格（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 style.json）
 - 游戏侧：`POST /v1/chat/completions`、`GET /v1/models`（需 API Key）；`GET /health` 免鉴权
 
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、
-注入字符数、是否新建档、warnings、上游状态；回复非 JSON 时在 NPC 页标 ⚠。
+注入字符数、风格提示字符数、是否新建档、warnings、上游状态；回复非 JSON 时在 NPC 页标 ⚠。
 
 ---
 
-## 6. 已验证情况（2026-10-16）
+## 6. 已验证情况（截至 2026-10-17）
 
 - 用历史日志中的 **33 条真实游戏请求**回放（18 个不同角色模板 + 一段 12 轮连续会话 +
   压缩器 + ping）：33/33 通过，回复全部是合法游戏 JSON；
@@ -278,6 +288,17 @@ data/  或  data_test/
   过程口径清零、保留"未经证实"标注，并新增高价值的「习惯与忌讳」条目。
   与超限重试配合（六分区不得整节删除，只压每条字数）；现有 memory.md 会在下次摘要（含空闲兜底）
   时被自然重排，无需手工改。
+
+- **对话风格（2026-10-17，新增）**：全局提示词（`config.style.global`）+ 逐 NPC 专属提示
+  （`data/npcs/<slug>/style.json = {useGlobal,text}`），合为一条 system 注入，位置在记忆之后、
+  输出格式提醒之前，且**独立于记忆开关**（首轮 / 记忆关闭时同样生效）。
+  隔离测试 18/18 通过（注入只新增 1 条 system、不改动原消息、位置正确、空输入不注入、
+  style.json 默认态删除文件、中文往返无损）；端到端（假上游）26/26 通过：
+  游戏原始 system 原样保留在首位、"叠加全局 vs 不叠加 vs 总开关关闭"三种组合注入正确、
+  顺序为 记忆→风格→格式提醒→user、超 4000 字与非法 slug 正确拒绝（400/404）、
+  `/api/npcs/%` 回归 404、日志记录 `styleChars`。管理页浏览器实测：
+  全局设置持久化、逐 NPC 保存后列表出「专属风格」标签、重开面板文本仍在、无 JS 报错。
+  风格提示只作表演导向并声明"冲突时以系统为准"，不覆盖游戏下发的 system。
 
 ### 排障
 

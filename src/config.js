@@ -96,6 +96,12 @@ export function defaults() {
         idleFlushMs: 300000, // 5 分钟无新请求即视为本段会话已结束（扫描周期固定 5 秒，不可配）
       },
     },
+    // 对话风格：玩家设定的演出提示（全局对所有 NPC 生效）。
+    // 逐 NPC 的专属提示与「是否叠加全局」存于 data/npcs/<slug>/style.json（见 memory/store.js）。
+    style: {
+      enabled: true,
+      global: '',
+    },
     log: {
       memorySize: 1000,
       maxDays: 14,
