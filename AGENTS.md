@@ -38,7 +38,7 @@
    ④ 读 data/npcs/<slug>/memory.md 与该 NPC 的 style.json，作为 system 注入
       （长期记忆 + 对话风格提示；风格独立于记忆开关，插在记忆之后、输出格式提醒之前）
    ⑤ 模型名映射 + thinking:{type:"disabled"} + 输出格式强化提醒 → 转发上游
-   ⑥ SSE 真流式原样回传游戏（不缓冲），旁路 Tee 解析回复文本
+   ⑥ SSE 真流式原样回传游戏（不缓冲），旁路 Tee 解析回复文本、思维链与 usage
    ⑦ 响应结束后异步（不阻塞玩家）：
       - conversations.jsonl 追加 player/npc 两条
       - state.json 更新（轮次、最近游戏状态）
@@ -62,8 +62,15 @@
 - **对话风格**：玩家可设**全局提示词**（对所有 NPC 生效）与**逐 NPC 专属提示词**
   （`data/npcs/<slug>/style.json = {useGlobal, text}`）。二者合为一条 system，插在最后一条
   user 前（记忆之后、输出格式提醒之前），**独立于记忆开关**，首轮即生效。
-  提示词只作表演导向，明确"与本轮系统规则／输出格式冲突时以系统为准"，不覆盖游戏下发的 system。
+  提示词优先级高于游戏下发的角色设定、世界观与表演尺度；但保留 JSON 输出格式与必需字段这一
+  技术底线（否则游戏无法解析），并在提示中明确"输出格式仍以本轮系统要求为准"。
   逐 NPC 可勾选"不叠加全局"（让某角色豁免全局尺度，或干脆不注入风格）。全局与逐 NPC 各限 4000 字。
+- **执行日志详情**：每条请求可在管理页点击展开，查看最终发送给上游的完整 messages
+  （标注游戏原始 / 外置记忆 / 对话风格 / 格式提醒 / 历史对话 / 玩家本轮）、思维链、
+  完整回复与 token 总数；主日志只保留轻量摘要。请求详情落盘到
+  `logs/details/YYYY-MM-DD.jsonl`，保留 14 天；内存只缓存最近 100 条，更早的按 `rid`
+  从磁盘读取。流式精确 token 需开启 `upstream.includeUsage`（默认关闭），否则按字符估算
+  并在界面标 `≈`。
 - **降级**：记忆层任何异常都退化为纯透传（warnings 落日志）；摘要失败只记日志；
   上游错误返回标准错误 JSON。
 
@@ -112,6 +119,7 @@
 | `server.host/port/apiKey/servedModel` | 本地监听与游戏侧凭证（改端口需重启） |
 | `upstream.baseUrl/apiKey/model` | 真实 Provider；baseUrl 带不带 `/v1` 均可 |
 | `upstream.disableThinking` | 默认 `false`：**不干涉上游思考**，与游戏裸模型行为一致。设为 `true` 才会补 `thinking:{type:"disabled"}`（更低延迟，但会削弱对复杂 system 规则的遵从）；无论开关如何，调用方显式带 `thinking` 时都不覆盖 |
+| `upstream.includeUsage` | 默认 `false`：流式请求不主动注入 `stream_options.include_usage`，避免多出的 `choices: []` 汇总 chunk 影响游戏端解析。开启后每轮可拿到精确 token 总数（执行日志仍只显示总数）；关闭时按字符估算并标 `≈` |
 | `memory.enabled` | 记忆总开关；关闭等同纯透传 |
 | `memory.injectMaxChars` | 注入长期记忆字符上限（默认 3200，与 `maxMemoryChars` 留有余量；超出则保留最新部分、丢弃较早内容） |
 | `memory.snapshotSystem` | system 内容变化时存档原文 |
@@ -164,6 +172,7 @@ WorldApartProject/
 data/  或  data_test/
 ├─ config.json
 ├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / memory_edit / config / server / auth
+├─ logs/details/YYYY-MM-DD.jsonl # 请求详情（完整 prompt / 思维链 / 回复 / usage），保留 14 天
 └─ npcs/<slug>/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
@@ -245,7 +254,8 @@ data/  或  data_test/
 - `GET /api/status`：连接信息、上游状态、记忆开关
 - `GET/PUT /api/config`：查看/保存配置（上游 Key 掩码显示，留空不修改；保存即时生效；含 `style.enabled/global`）
 - `GET /api/events`：SSE，实时推送每条运行日志
-- `GET /api/logs?limit=`：最近日志
+- `GET /api/logs?limit=`：最近日志（接口按时间正序返回；管理页展示时按时间倒序，最新在上）
+- `GET /api/logs/:rid/detail`：按日志的 `rid` 读取请求详情（完整 messages、reasoning、reply、usage；主日志只带 `hasDetail` 与 token 总数）
 - `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、专属对话风格与最近对话
 - `PUT /api/npcs/:slug/style`：保存该 NPC 专属对话风格（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 style.json）
 - `POST /api/npcs/:slug/memory/rewrite`：按玩家一次性指令（`{prompt}`，上限 4000 字）用上游模型改写该 NPC 长期记忆，返回草稿 `{original,draft}`（**不落盘**；上游未配 Key 返 503）
@@ -322,7 +332,14 @@ data/  或  data_test/
   顺序为 记忆→风格→格式提醒→user、超 4000 字与非法 slug 正确拒绝（400/404）、
   `/api/npcs/%` 回归 404、日志记录 `styleChars`。管理页浏览器实测：
   全局设置持久化、逐 NPC 保存后列表出「专属风格」标签、重开面板文本仍在、无 JS 报错。
-  风格提示只作表演导向并声明"冲突时以系统为准"，不覆盖游戏下发的 system。
+  风格提示优先级高于角色设定/世界观/表演尺度，但保留 JSON 输出格式与必需字段这一技术底线。
+
+- **执行日志详情（2026-10-18，新增）**：日志与请求详情分离，主日志只记 `rid` /
+  `hasDetail` / `tokens.total`；详情落盘 `logs/details/YYYY-MM-DD.jsonl`，保留 14 天，
+  内存 LRU 最近 100 条并提供 `GET /api/logs/:rid/detail`。管理页点击日志展开，展示
+  最终 Prompt（标注游戏原始 / 外置记忆 / 对话风格 / 格式提醒 / 历史对话 / 玩家本轮）、
+  思维链、完整回复与 token 总数。集成测试已验证：流式 reasoning/usage 捕获、来源标注、
+  token 总数、`includeUsage` 注入、重启后从磁盘回读日志与详情。
 
 ### 排障
 

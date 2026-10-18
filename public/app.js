@@ -45,6 +45,7 @@ async function loadConfig() {
   $('#upApiKey').value = '';
   $('#upApiKey').placeholder = c.upstream.apiKeySet ? '已设置（' + c.upstream.apiKey + '），留空不修改' : '未设置，请填写';
   $('#upDisableThinking').checked = !!c.upstream.disableThinking;
+  $('#upIncludeUsage').checked = !!c.upstream.includeUsage;
   $('#memEnabled').checked = !!c.memory.enabled;
   $('#memSnapshot').checked = !!c.memory.snapshotSystem;
   $('#sumEnabled').checked = !!c.memory.summarizer.enabled;
@@ -61,6 +62,7 @@ $('#saveUpstream').addEventListener('click', async () => {
       baseUrl: $('#upBaseUrl').value.trim(),
       model: $('#upModel').value.trim(),
       disableThinking: $('#upDisableThinking').checked,
+      includeUsage: $('#upIncludeUsage').checked,
     },
   };
   const key = $('#upApiKey').value.trim();
@@ -139,11 +141,178 @@ function kindBadge(rec) {
   return `<span class="badge ${bad ? 'err' : kindOf(rec)}">${bad ? '错误' : esc(kindOf(rec))}</span>`;
 }
 
+function fmtTok(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '—';
+  return Math.round(v).toLocaleString('en-US');
+}
+
+function tokenTag(rec) {
+  const tk = rec.tokens;
+  if (!tk || tk.total == null) return '';
+  const prefix = tk.estimated ? '≈' : '';
+  return `<span class="log-tok" title="token 总数${tk.estimated ? '（估算）' : ''}">${prefix}${fmtTok(tk.total)} tok</span>`;
+}
+
+function originLabel(origin) {
+  return (
+    {
+      game: '游戏原始',
+      memory: '外置记忆',
+      style: '对话风格',
+      format: '格式提醒',
+      history: '历史对话',
+      player: '玩家本轮',
+      internal: '内部调用',
+      other: '其他',
+    }[origin] || origin || ''
+  );
+}
+
+function renderDetail(d) {
+  const req = d.request || {};
+  const meta = [
+    req.model ? `模型 ${req.model}` : '',
+    req.stream ? '流式' : '非流式',
+    req.messageCount != null ? `${req.messageCount} 条消息` : '',
+    req.temperature != null ? `temperature ${req.temperature}` : '',
+    req.max_tokens != null ? `max_tokens ${req.max_tokens}` : '',
+    req.thinking ? `thinking ${JSON.stringify(req.thinking)}` : 'thinking 默认',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const messages = (d.messages || [])
+    .map(
+      (m) => `<div class="msg-item origin-${esc(m.origin || 'game')}">
+        <div class="msg-meta">
+          <span class="msg-role">${esc(m.role)}</span>
+          <span class="msg-origin">${esc(originLabel(m.origin))}</span>
+          <span class="msg-origin">${m.chars != null ? m.chars + ' 字' : ''}</span>
+        </div>
+        <pre class="detail-pre">${esc(m.content || '')}</pre>
+      </div>`,
+    )
+    .join('');
+
+  const reasoning = d.reasoning
+    ? `<pre class="detail-pre">${esc(d.reasoning)}${d.reasoningTruncated ? '\n…（思维链过长，已截断）' : ''}</pre>`
+    : `<p class="detail-note">${
+        d.kind === 'summary' || d.kind === 'memory_edit'
+          ? '内部调用已禁用思考，无思维链。'
+          : '上游未返回思维链（可能未开启思考，或该模型不支持 reasoning_content）。'
+      }</p>`;
+
+  const replyLabel =
+    d.kind === 'summary' ? '生成结果（记忆正文）' : d.kind === 'memory_edit' ? '生成草稿' : '完整回复';
+  const reply = d.reply
+    ? `<pre class="detail-pre">${esc(d.reply)}</pre>`
+    : '<p class="detail-note">（无回复文本）</p>';
+  const error = d.error ? `<p class="detail-note warn">错误：${esc(d.error)}</p>` : '';
+
+  const tk = d.tokens;
+  const tokenLine =
+    tk && tk.total != null
+      ? `<div class="token-usage">
+          <span class="token-usage-title">Token 用量</span>
+          <span class="token-usage-total">${tk.estimated ? '≈' : ''}${fmtTok(tk.total)} tok</span>
+          <span class="token-usage-source">${tk.estimated ? '字符估算' : '上游 usage'}</span>
+        </div>`
+      : '';
+
+  return `
+    ${tokenLine}
+    ${error}
+    <div class="detail-bar">
+      <span class="detail-note">${esc(meta)}</span>
+      <span class="detail-actions">
+        <button class="btn sm" data-copy-detail="prompt">复制 Prompt</button>
+        <button class="btn sm" data-copy-detail="reasoning">复制思维链</button>
+        <button class="btn sm" data-copy-detail="reply">复制回复</button>
+      </span>
+    </div>
+    <div class="detail-section">
+      <h5>发送给上游的 Prompt（${(d.messages || []).length} 条消息）</h5>
+      ${messages || '<p class="detail-note">（无）</p>'}
+    </div>
+    <div class="detail-section"><h5>思维链</h5>${reasoning}</div>
+    <div class="detail-section"><h5>${replyLabel}</h5>${reply}</div>`;
+}
+
+function bindDetailActions(host) {
+  host.querySelectorAll('[data-copy-detail]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const d = host._detail || {};
+      let text = '';
+      if (btn.dataset.copyDetail === 'prompt') {
+        text = (d.messages || [])
+          .map((m) => `[${m.role} · ${originLabel(m.origin)}]\n${m.content || ''}`)
+          .join('\n\n');
+      } else if (btn.dataset.copyDetail === 'reasoning') {
+        text = d.reasoning || '';
+      } else {
+        text = d.reply || '';
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+        const old = btn.textContent;
+        btn.textContent = '已复制';
+        setTimeout(() => (btn.textContent = old), 1200);
+      } catch {}
+    });
+  });
+}
+
+async function toggleLogDetail(div, rec) {
+  const label = div.querySelector('.log-expand');
+  const open = div.dataset.expanded === '1';
+  if (open) {
+    div.dataset.expanded = '';
+    div.setAttribute('aria-expanded', 'false');
+    div.classList.remove('expanded');
+    if (label) label.textContent = '详情 ▾';
+    const host = div.querySelector('.log-detail');
+    if (host) host.hidden = true;
+    return;
+  }
+
+  div.dataset.expanded = '1';
+  div.setAttribute('aria-expanded', 'true');
+  div.classList.add('expanded');
+  if (label) label.textContent = '收起 ▴';
+
+  let host = div.querySelector('.log-detail');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'log-detail';
+    host.innerHTML = '<p class="detail-note">加载详情…</p>';
+    div.appendChild(host);
+  }
+  host.hidden = false;
+  if (host.dataset.loaded === '1') return;
+
+  try {
+    const d = await api('/api/logs/' + encodeURIComponent(rec.rid) + '/detail');
+    host._detail = d.detail;
+    host.innerHTML = renderDetail(d.detail);
+    host.dataset.loaded = '1';
+    bindDetailActions(host);
+  } catch (err) {
+    const msg = String(err.message || err);
+    host.innerHTML = msg.includes('404')
+      ? '<p class="detail-note">详情已过期或不存在（服务仅保留最近 14 天的详情）。</p>'
+      : `<p class="detail-note warn">加载详情失败：${esc(msg)}</p>`;
+  }
+}
+
 function renderLog(rec) {
   const t = new Date(rec.ts).toLocaleTimeString('zh-CN', { hour12: false });
   const div = document.createElement('div');
   div.className = 'log-item ' + kindOf(rec);
   div.dataset.status = rec.status || '';
+  div.dataset.rid = rec.rid || '';
+  if (rec.hasDetail) div.classList.add('has-detail');
   let body = '';
 
   if (rec.kind === 'npc' || rec.kind === 'compressor' || rec.kind === 'probe') {
@@ -160,26 +329,47 @@ function renderLog(rec) {
           ${rec.isNewNpc ? '<span class="tag">新建档</span>' : ''}
           ${rec.injectChars ? `<span>注入记忆 ${rec.injectChars} 字</span>` : ''}
           ${rec.styleChars ? `<span>风格提示 ${rec.styleChars} 字</span>` : ''}
+          ${tokenTag(rec)}
           ${timing.map((x) => `<span>${x}</span>`).join('')}
           ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
         </div>`;
     } else {
-      body = `<div class="log-meta">${esc(rec.modelIn || '')} → ${esc(rec.modelOut || '')} ${timing.map((x) => `<span>${x}</span>`).join('')}</div>`;
+      body = `<div class="log-meta">${esc(rec.modelIn || '')} → ${esc(rec.modelOut || '')} ${tokenTag(rec)} ${timing.map((x) => `<span>${x}</span>`).join('')}</div>`;
     }
   } else if (rec.kind === 'summary') {
     body = `<div class="log-line">${esc(rec.slug || '')} 记忆压缩 ${rec.status === 'done' ? '完成' : '失败'}</div>
-      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
   } else if (rec.kind === 'memory_edit') {
     const act = rec.action === 'save' ? '保存记忆' : 'AI 改写记忆';
     body = `<div class="log-line">${esc(rec.slug || '')} ${act} ${rec.status === 'done' ? '完成' : '失败'}</div>
-      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
   } else if (rec.kind === 'auth') {
     body = `<div class="log-line warn">鉴权失败：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
   } else {
     body = `<div class="log-line">${esc(rec.status || '')} ${esc(rec.error || rec.kind || '')}</div>`;
   }
 
-  div.innerHTML = `<div class="log-head">${kindBadge(rec)}<span>${t}</span><span>#${rec.seq}</span></div><div class="log-body">${body}</div>`;
+  div.innerHTML = `<div class="log-head">${kindBadge(rec)}<span>${t}</span><span>#${rec.seq}</span>${
+    rec.hasDetail ? '<span class="log-expand">详情 ▾</span>' : ''
+  }</div><div class="log-body">${body}</div>`;
+
+  if (rec.hasDetail) {
+    div.setAttribute('role', 'button');
+    div.setAttribute('tabindex', '0');
+    div.setAttribute('aria-expanded', 'false');
+    div.addEventListener('click', (e) => {
+      if (e.target.closest('button, a, input, textarea, .log-detail')) return;
+      const sel = window.getSelection?.();
+      if (sel && sel.toString()) return;
+      toggleLogDetail(div, rec);
+    });
+    div.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target.closest('button, a, input, textarea, .log-detail')) return;
+      e.preventDefault();
+      toggleLogDetail(div, rec);
+    });
+  }
   return div;
 }
 
@@ -189,12 +379,31 @@ function matchFilter(rec) {
   return kindOf(rec) === currentKind;
 }
 
+/** 批量渲染：按时间倒序（最新在上），用于首次快照与筛选结果。 */
+function renderLogs(records) {
+  const list = $('#logList');
+  list.innerHTML = '';
+  records
+    .filter(matchFilter)
+    .slice()
+    .sort((a, b) => {
+      const byTime = String(b.ts || '').localeCompare(String(a.ts || ''));
+      return byTime !== 0 ? byTime : (Number(b.seq) || 0) - (Number(a.seq) || 0);
+    })
+    .forEach((r) => list.appendChild(renderLog(r)));
+  if ($('#autoScroll').checked) list.scrollTop = 0;
+}
+
+/** 实时新日志：插到顶部；关闭自动滚动时保持当前阅读位置。 */
 function addLog(rec) {
   if (!matchFilter(rec)) return;
   const list = $('#logList');
-  list.appendChild(renderLog(rec));
-  while (list.children.length > 500) list.removeChild(list.firstChild);
-  if ($('#autoScroll').checked) list.scrollTop = list.scrollHeight;
+  const prevTop = list.scrollTop;
+  const prevHeight = list.scrollHeight;
+  list.prepend(renderLog(rec));
+  while (list.children.length > 500) list.removeChild(list.lastElementChild);
+  if ($('#autoScroll').checked) list.scrollTop = 0;
+  else list.scrollTop = prevTop + (list.scrollHeight - prevHeight);
 }
 
 $$('#kindFilters .chip').forEach((chip) =>
@@ -202,9 +411,8 @@ $$('#kindFilters .chip').forEach((chip) =>
     $$('#kindFilters .chip').forEach((x) => x.classList.remove('active'));
     chip.classList.add('active');
     currentKind = chip.dataset.kind;
-    $('#logList').innerHTML = '';
     api('/api/logs?limit=300')
-      .then((d) => d.records.filter(matchFilter).forEach((r) => addLog(r)))
+      .then((d) => renderLogs(d.records))
       .catch(() => {});
   }),
 );
@@ -218,8 +426,7 @@ function connectEvents() {
   es.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'snapshot') {
-      $('#logList').innerHTML = '';
-      msg.records.filter(matchFilter).forEach((r) => addLog(r));
+      renderLogs(msg.records);
     } else if (msg.type === 'log') {
       addLog(msg.record);
     }

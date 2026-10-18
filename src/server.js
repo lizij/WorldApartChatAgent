@@ -27,7 +27,7 @@ import { injectMemory, injectStyle } from './memory/inject.js';
 import { Summarizer } from './memory/summarizer.js';
 import { MemoryRewriter } from './memory/rewriter.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
-import { forwardUpstream, sendJsonError } from './upstream.js';
+import { forwardUpstream, messageText, sendJsonError, tokenUsage } from './upstream.js';
 import { KeyedQueue } from './locks.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -40,6 +40,10 @@ const MEMORY_EDIT_MAX_CHARS = 4000;
 
 /** 手工保存记忆正文的上限（字）；防止误粘贴超长文本。 */
 const MEMORY_TEXT_MAX_CHARS = 200000;
+
+/** 输出格式强化提醒（注入与日志来源标注共用同一常量）。 */
+const FORMAT_REMINDER =
+  '再次提醒：本轮必须且只能输出系统要求的那个 JSON 对象（不要 JSON 代码围栏、不要解释、不要输出 JSON 之外的文字）。';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -83,7 +87,61 @@ function prepareUpstreamBody(body, cfg) {
   if (cfg.upstream.disableThinking && out.thinking === undefined) {
     out.thinking = { type: 'disabled' };
   }
+  // 可选：让上游在流式响应末尾额外返回 usage（默认关闭，避免影响游戏端解析）。
+  if (cfg.upstream.includeUsage && out.stream) {
+    const so =
+      out.stream_options && typeof out.stream_options === 'object' ? out.stream_options : {};
+    out.stream_options = { ...so, include_usage: true };
+  }
   return out;
+}
+
+/** 日志详情里记录的请求参数（不含密钥）。 */
+function requestMeta(body) {
+  return {
+    model: body?.model || null,
+    stream: !!body?.stream,
+    temperature: body?.temperature ?? null,
+    max_tokens: body?.max_tokens ?? null,
+    thinking: body?.thinking ?? null,
+    messageCount: Array.isArray(body?.messages) ? body.messages.length : 0,
+    includeUsage: !!body?.stream_options?.include_usage,
+  };
+}
+
+/** 给最终 messages 标来源，便于在日志里看清哪些内容来自记忆/风格/格式提醒。 */
+function buildDetailMessages(messages, injected) {
+  const list = Array.isArray(messages) ? messages : [];
+  let lastUser = -1;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i]?.role === 'user') {
+      lastUser = i;
+      break;
+    }
+  }
+  return list.map((m, i) => {
+    const content = messageText(m);
+    let origin = 'game';
+    if (injected && injected.has(content)) origin = injected.get(content);
+    else if (m?.role === 'user') origin = i === lastUser ? 'player' : 'history';
+    else if (m?.role === 'assistant') origin = 'history';
+    else if (m?.role === 'system') origin = 'game';
+    else if (m?.role) origin = 'other';
+    return { role: m?.role || 'unknown', origin, content, chars: content.length };
+  });
+}
+
+function tokenFields(tokens) {
+  return tokens ? { tokens } : {};
+}
+
+function detailTiming(result) {
+  return {
+    ttftMs: result?.ttftMs ?? null,
+    reasoningTtftMs: result?.reasoningTtftMs ?? null,
+    contentTtftMs: result?.contentTtftMs ?? null,
+    durationMs: result?.durationMs ?? null,
+  };
 }
 
 function parseNpcReply(text) {
@@ -204,6 +262,7 @@ export function createServer({ config, logger }) {
           model: c.upstream.model,
           hasApiKey: !!c.upstream.apiKey,
           disableThinking: !!c.upstream.disableThinking,
+          includeUsage: !!c.upstream.includeUsage,
         },
         memory: c.memory,
       }),
@@ -257,6 +316,7 @@ export function createServer({ config, logger }) {
       if (model) safe.upstream.model = model;
       if (patch.upstream.insecureTLS !== undefined) safe.upstream.insecureTLS = !!patch.upstream.insecureTLS;
       if (patch.upstream.disableThinking !== undefined) safe.upstream.disableThinking = !!patch.upstream.disableThinking;
+      if (patch.upstream.includeUsage !== undefined) safe.upstream.includeUsage = !!patch.upstream.includeUsage;
       const ct = intIn(patch.upstream.connectTimeoutMs, 1000, 600000);
       if (ct !== undefined) safe.upstream.connectTimeoutMs = ct;
       const rt = intIn(patch.upstream.requestTimeoutMs, 1000, 3600000);
@@ -455,16 +515,39 @@ export function createServer({ config, logger }) {
     } catch {}
     const started = Date.now();
     try {
-      const { draft, durationMs } = await rewriter.rewrite(slug, memoryFile, prompt);
-      logger.append({
-        kind: 'memory_edit',
+      const { draft, durationMs, usage, messages, request } = await rewriter.rewrite(
         slug,
+        memoryFile,
+        prompt,
+      );
+      const tokens = tokenUsage({ usage, messages, reply: draft });
+      const detail = {
+        kind: 'memory_edit',
         action: 'rewrite',
-        status: 'done',
-        durationMs,
-        promptChars: prompt.length,
-        generatedChars: draft.length,
-      });
+        request: request || { model: cfg().upstream.model, stream: false, messageCount: messages?.length || 0 },
+        messages: (messages || []).map((m) => {
+          const content = messageText(m);
+          return { role: m.role, origin: 'internal', content, chars: content.length };
+        }),
+        reasoning: '',
+        reply: draft,
+        usage: usage || null,
+        tokens,
+        timing: { durationMs },
+      };
+      logger.append(
+        {
+          kind: 'memory_edit',
+          slug,
+          action: 'rewrite',
+          status: 'done',
+          durationMs,
+          promptChars: prompt.length,
+          generatedChars: draft.length,
+          ...tokenFields(tokens),
+        },
+        detail,
+      );
       res.setHeader('content-type', 'application/json; charset=utf-8');
       res.end(JSON.stringify({ ok: true, slug, original, draft }));
     } catch (err) {
@@ -565,19 +648,55 @@ export function createServer({ config, logger }) {
     };
 
     if (info.type !== 'npc') {
+      const finalBody = prepareUpstreamBody(body, c);
+      const detail = {
+        kind: info.type,
+        request: requestMeta(finalBody),
+        messages: buildDetailMessages(finalBody.messages),
+        reasoning: '',
+        reasoningTruncated: false,
+        reply: '',
+        usage: null,
+        tokens: null,
+        timing: {},
+        error: null,
+      };
       try {
-        const result = await forwardUpstream(prepareUpstreamBody(body, c), res, c);
-        logger.append({
-          ...baseLog,
-          // 上游非 2xx 时如实记 upstream_error，不要一律记 done
-          status: result.ok ? 'done' : 'upstream_error',
-          upstreamStatus: result.status,
-          durationMs: result.durationMs,
-          ttftMs: result.ttftMs,
-          contentTtftMs: result.contentTtftMs,
+        const result = await forwardUpstream(finalBody, res, c);
+        const tokens = tokenUsage({
+          usage: result.usage,
+          messages: finalBody.messages,
+          reply: result.assistantText,
+          reasoning: result.reasoningText,
         });
+        Object.assign(detail, {
+          reasoning: result.reasoningText,
+          reasoningTruncated: !!result.reasoningTruncated,
+          reply: result.assistantText,
+          usage: result.usage || null,
+          tokens,
+          timing: detailTiming(result),
+        });
+        logger.append(
+          {
+            ...baseLog,
+            // 上游非 2xx 时如实记 upstream_error，不要一律记 done
+            status: result.ok ? 'done' : 'upstream_error',
+            upstreamStatus: result.status,
+            durationMs: result.durationMs,
+            ttftMs: result.ttftMs,
+            reasoningTtftMs: result.reasoningTtftMs,
+            contentTtftMs: result.contentTtftMs,
+            ...tokenFields(tokens),
+          },
+          detail,
+        );
       } catch (err) {
-        logger.append({ ...baseLog, status: 'error', durationMs: Date.now() - started, error: err?.message || String(err) });
+        detail.error = err?.message || String(err);
+        logger.append(
+          { ...baseLog, status: 'error', durationMs: Date.now() - started, error: detail.error },
+          detail,
+        );
         sendJsonError(res, 502, 'upstream_error', `上游请求失败: ${err?.message || err}`);
       }
       return;
@@ -589,6 +708,8 @@ export function createServer({ config, logger }) {
     let styleChars = 0;
     let snapshotChanged = false;
     const warnings = [];
+    // 记录注入内容 → 来源，用于日志详情标注「游戏原始 / 外置记忆 / 风格 / 格式提醒」
+    const injected = new Map();
 
     try {
       if (memEnabled) {
@@ -608,6 +729,7 @@ export function createServer({ config, logger }) {
           maxChars: c.memory.injectMaxChars,
         });
         injectChars = inj.chars;
+        if (inj.chars) injected.set(inj.injectedText, 'memory');
         body = { ...body, messages: inj.messages };
       }
 
@@ -623,6 +745,7 @@ export function createServer({ config, logger }) {
           if (injStyle.chars) {
             body = { ...body, messages: injStyle.messages };
             styleChars = injStyle.chars;
+            injected.set(injStyle.injectedText, 'style');
           }
         } catch (err) {
           warnings.push('style_inject_failed:' + err.message);
@@ -640,11 +763,8 @@ export function createServer({ config, logger }) {
             break;
           }
         }
-        messages.splice(at, 0, {
-          role: 'system',
-          content:
-            '再次提醒：本轮必须且只能输出系统要求的那个 JSON 对象（不要 JSON 代码围栏、不要解释、不要输出 JSON 之外的文字）。',
-        });
+        messages.splice(at, 0, { role: 'system', content: FORMAT_REMINDER });
+        injected.set(FORMAT_REMINDER, 'format');
         body = { ...body, messages };
       }
     } catch (err) {
@@ -652,30 +772,76 @@ export function createServer({ config, logger }) {
       bundle = null;
     }
 
+    const finalBody = prepareUpstreamBody(body, c);
+    const detail = {
+      kind: 'npc',
+      request: requestMeta(finalBody),
+      messages: buildDetailMessages(finalBody.messages, injected),
+      reasoning: '',
+      reasoningTruncated: false,
+      reply: '',
+      usage: null,
+      tokens: null,
+      timing: {},
+      error: null,
+    };
+
     let result;
     try {
-      result = await forwardUpstream(prepareUpstreamBody(body, c), res, c);
+      result = await forwardUpstream(finalBody, res, c);
     } catch (err) {
-      logger.append({ ...baseLog, status: 'error', injectChars, styleChars, warnings, durationMs: Date.now() - started, error: err?.message || String(err) });
+      detail.error = err?.message || String(err);
+      logger.append(
+        {
+          ...baseLog,
+          status: 'error',
+          injectChars,
+          styleChars,
+          warnings,
+          durationMs: Date.now() - started,
+          error: detail.error,
+        },
+        detail,
+      );
       sendJsonError(res, 502, 'upstream_error', `上游请求失败: ${err?.message || err}`);
       return;
     }
 
-    logger.append({
-      ...baseLog,
-      status: result.ok ? 'done' : 'upstream_error',
-      upstreamStatus: result.status,
-      injectChars,
-      styleChars,
-      isNewNpc: bundle?.isNew || false,
-      snapshotChanged,
-      warnings,
-      ttftMs: result.ttftMs,
-      contentTtftMs: result.contentTtftMs,
-      durationMs: Date.now() - started,
-      replyChars: result.assistantText.length,
-      replyPreview: result.assistantText.slice(0, 500),
+    const tokens = tokenUsage({
+      usage: result.usage,
+      messages: finalBody.messages,
+      reply: result.assistantText,
+      reasoning: result.reasoningText,
     });
+    Object.assign(detail, {
+      reasoning: result.reasoningText,
+      reasoningTruncated: !!result.reasoningTruncated,
+      reply: result.assistantText,
+      usage: result.usage || null,
+      tokens,
+      timing: detailTiming(result),
+    });
+
+    logger.append(
+      {
+        ...baseLog,
+        status: result.ok ? 'done' : 'upstream_error',
+        upstreamStatus: result.status,
+        injectChars,
+        styleChars,
+        isNewNpc: bundle?.isNew || false,
+        snapshotChanged,
+        warnings,
+        ttftMs: result.ttftMs,
+        reasoningTtftMs: result.reasoningTtftMs,
+        contentTtftMs: result.contentTtftMs,
+        durationMs: Date.now() - started,
+        replyChars: result.assistantText.length,
+        replyPreview: result.assistantText.slice(0, 500),
+        ...tokenFields(tokens),
+      },
+      detail,
+    );
 
     if (!memEnabled || !bundle || !result.ok || !result.assistantText.trim()) return;
 
@@ -767,6 +933,19 @@ export function createServer({ config, logger }) {
         if (normPath === '/api/logs' && req.method === 'GET') {
           res.setHeader('content-type', 'application/json; charset=utf-8');
           return res.end(JSON.stringify({ records: logger.list(Number(url.searchParams.get('limit')) || 300) }));
+        }
+        const md = normPath.match(/^\/api\/logs\/([^/]+)\/detail$/);
+        if (md && req.method === 'GET') {
+          let rid;
+          try {
+            rid = decodeURIComponent(md[1]);
+          } catch {
+            rid = md[1];
+          }
+          const detail = logger.getDetail(rid);
+          if (!detail) return sendJsonError(res, 404, 'detail_not_found', '详情已过期或不存在');
+          res.setHeader('content-type', 'application/json; charset=utf-8');
+          return res.end(JSON.stringify({ ok: true, detail }));
         }
         if (normPath === '/api/events' && req.method === 'GET') return handleEvents(req, res);
         if (normPath === '/api/npcs' && req.method === 'GET') return handleNpcList(req, res);

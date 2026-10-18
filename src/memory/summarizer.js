@@ -5,6 +5,7 @@
  */
 import fs from 'node:fs';
 import { upstreamChatUrl } from '../config.js';
+import { sumUsageTotals, tokenUsage, usageTotal } from '../upstream.js';
 import { recentConversations, writeMemory, saveState, loadMemory } from './store.js';
 
 const SYSTEM_PROMPT = [
@@ -142,7 +143,7 @@ export class Summarizer {
       const json = await res.json();
       const body = json?.choices?.[0]?.message?.content?.trim();
       if (!body) throw new Error('摘要响应为空');
-      return body;
+      return { text: body, usage: json?.usage || null };
     } finally {
       clearTimeout(timer);
     }
@@ -177,17 +178,19 @@ export class Summarizer {
         `【本轮游戏侧摘要（如有，视为已确认事实）】\n${stateSnapshot?.lastGame?.pastEvents || '（无）'}\n\n` +
         `【新增对话】\n${dialogue || '（无）'}`;
 
+      const usageList = [];
       const first = await this.#call([
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userContent },
       ]);
+      usageList.push(first.usage);
 
       // 超限重试：实测 prompt 里的「字数上限」几乎不被遵守（超 277~353 字），
       // 而模型本身有能力写短——把上一次输出回喂、明确要求砍到上限内，
       // 比事后机械截断更靠谱（截断会稳定切掉同一位置之后的内容）。
       const limit = Number(cfg.maxMemoryChars) || 0;
       const maxRetries = Math.max(0, Math.min(3, Number(cfg.overLimitRetries) || 0));
-      let text = first;
+      let text = first.text;
       let retries = 0;
       while (limit > 0 && text.length > limit && retries < maxRetries) {
         retries += 1;
@@ -195,8 +198,9 @@ export class Summarizer {
           { role: 'system', content: SYSTEM_PROMPT },
           { role: 'user', content: compressPrompt(slug, text, limit, retries) },
         ]);
-        if (shrunk.length >= text.length) break; // 没压下去就别再试，交给截断兜底
-        text = shrunk;
+        usageList.push(shrunk.usage);
+        if (shrunk.text.length >= text.length) break; // 没压下去就别再试，交给截断兜底
+        text = shrunk.text;
       }
 
       // 兜底：重试用尽后仍超限，按行边界截断（尽量不切断一句话）
@@ -219,19 +223,61 @@ export class Summarizer {
       fresh.lastSummaryTurn = fresh.turns || stateSnapshot.turns;
       saveState(bundle.stateFile, fresh);
 
-      this.logger.append({
+      const usageComplete =
+        usageList.length > 0 && usageList.every((u) => usageTotal(u) != null);
+      const usage = usageComplete ? { total_tokens: sumUsageTotals(usageList) } : null;
+      const messages = [
+        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'user', content: userContent },
+      ];
+      const tokens = tokenUsage({ usage, messages, reply: final });
+      const detail = {
         kind: 'summary',
-        slug,
-        sessionId: bundle.sessionId,
-        reason,
-        status: 'done',
-        durationMs: Date.now() - started,
-        memoryChars: final.length,
-        generatedChars: first.length,
-        retries,
-        truncated,
-        warnings: truncated ? [`memory_over_limit:${first.length}>${limit}`] : [],
-      });
+        request: {
+          model: up.model,
+          stream: false,
+          temperature: 0.3,
+          max_tokens: cfg.maxTokens,
+          thinking: { type: 'disabled' },
+          messageCount: 2,
+        },
+        messages: messages.map((m) => ({
+          role: m.role,
+          origin: 'internal',
+          content: m.content,
+          chars: m.content.length,
+        })),
+        reasoning: '',
+        reasoningTruncated: false,
+        reply: final,
+        usage,
+        tokens,
+        timing: { durationMs: Date.now() - started },
+        meta: {
+          reason,
+          retries,
+          truncated,
+          calls: usageList.length,
+          generatedChars: first.text.length,
+        },
+      };
+      this.logger.append(
+        {
+          kind: 'summary',
+          slug,
+          sessionId: bundle.sessionId,
+          reason,
+          status: 'done',
+          durationMs: Date.now() - started,
+          memoryChars: final.length,
+          generatedChars: first.text.length,
+          retries,
+          truncated,
+          warnings: truncated ? [`memory_over_limit:${first.text.length}>${limit}`] : [],
+          tokens,
+        },
+        detail,
+      );
     } catch (err) {
       this.logger.append({
         kind: 'summary',

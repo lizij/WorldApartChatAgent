@@ -53,6 +53,8 @@
           <label>API Key（留空保存表示不修改）</label>
           <input id="upApiKey" type="password" placeholder="••••••••" autocomplete="off" />
           <label class="check"><input type="checkbox" id="upDisableThinking" /> 禁用思考链（thinking:disabled，最低延迟）</label>
+          <label class="check"><input type="checkbox" id="upIncludeUsage" /> 请求上游返回 token 用量（stream_options.include_usage）</label>
+          <p class="hint">开启后执行日志可显示每轮精确 token 总数；个别游戏端可能不兼容额外的用量数据包。关闭时按字符估算。</p>
           <div class="row right"><button class="btn primary" id="saveUpstream">保存上游配置</button></div>
         </div>
       </div>

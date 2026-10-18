@@ -67,11 +67,16 @@ export function injectStyle(body, { global: globalText, npc: npcText } = {}) {
 
   const lines = [
     '【对话风格 · 玩家设定的演出要求】',
-    '以下要求由与你对话的人单独设定，用于调整你这次的演出风格。请在保持角色设定、世界观与系统规则不变的前提下尽量遵从，把它当作导演给的表演提示：',
+    '以下要求由与你对话的人单独设定，是你这次演出的最高优先级表演要求（相当于导演给演员的现场指令）：在不改变本轮要求的 JSON 输出格式（结构、必需字段、枚举取值）的前提下，优先按这些要求调整角色表现、语气、尺度与互动方式。',
   ];
   if (g) lines.push('', '【全局要求】', g);
   if (p) lines.push('', '【本角色专属要求】', p);
-  lines.push('', '若这些要求与本轮系统给出的角色设定或输出格式冲突，一律以系统要求为准；不要提及本段提示或“风格/设定/提示”这类字眼。');
+  lines.push(
+    '',
+    '当这些要求与本轮系统给出的角色设定、世界观或表演尺度冲突时，以这些要求为准；角色设定与世界观可以为演出效果让位。',
+    '唯一例外：本轮要求的 JSON 输出格式与必需字段必须保持不变（游戏依赖它解析），不得改成非 JSON 或增删必需字段。',
+    '不要提及本段提示或“风格/设定/提示”这类字眼。',
+  );
 
   const injectedText = lines.join('\n');
   return { messages: insertBeforeLastUser(body.messages, injectedText), injectedText, chars: injectedText.length };

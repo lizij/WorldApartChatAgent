@@ -67,6 +67,10 @@ export function defaults() {
       // 表现为只按眼前一句话回复；
       // 开启思考才与裸模型行为一致。仅当确需压低延迟时才把它改成 true。
       disableThinking: false,
+      // 流式请求是否额外要求上游返回 usage（stream_options.include_usage）。
+      // 默认关闭：避免多出的「choices: []」汇总 chunk 影响游戏端 SSE 解析。
+      // 开启后可在执行日志里看到每轮精确 token 总数；关闭时按字符估算。
+      includeUsage: false,
       connectTimeoutMs: 15000,
       requestTimeoutMs: 300000,
     },

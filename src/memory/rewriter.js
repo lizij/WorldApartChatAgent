@@ -38,12 +38,35 @@ export class MemoryRewriter {
   rewrite(slug, memoryFile, instruction) {
     const started = Date.now();
     return this.queue.run('summary:' + slug, async () => {
-      const draft = await this.#call(slug, loadMemory(memoryFile, 100000), instruction);
-      return { draft, durationMs: Date.now() - started };
+      const current = loadMemory(memoryFile, 100000);
+      const messages = [
+        { role: 'system', content: EDITOR_SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content:
+            `NPC：${slug}\n\n【当前记忆全文】\n${current || '（暂无）'}\n\n【玩家修改要求】\n${instruction}`,
+        },
+      ];
+      const { text, usage } = await this.#call(messages);
+      const up = this.config.upstream;
+      return {
+        draft: text,
+        durationMs: Date.now() - started,
+        usage,
+        messages,
+        request: {
+          model: up.model,
+          stream: false,
+          temperature: 0.3,
+          max_tokens: MAX_TOKENS,
+          thinking: { type: 'disabled' },
+          messageCount: messages.length,
+        },
+      };
     });
   }
 
-  async #call(slug, current, instruction) {
+  async #call(messages) {
     const up = this.config.upstream;
     if (up.insecureTLS) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
     const ac = new AbortController();
@@ -58,14 +81,7 @@ export class MemoryRewriter {
           max_tokens: MAX_TOKENS,
           stream: false,
           thinking: { type: 'disabled' },
-          messages: [
-            { role: 'system', content: EDITOR_SYSTEM_PROMPT },
-            {
-              role: 'user',
-              content:
-                `NPC：${slug}\n\n【当前记忆全文】\n${current || '（暂无）'}\n\n【玩家修改要求】\n${instruction}`,
-            },
-          ],
+          messages,
         }),
         signal: ac.signal,
       });
@@ -76,7 +92,7 @@ export class MemoryRewriter {
       const json = await res.json();
       const body = json?.choices?.[0]?.message?.content?.trim();
       if (!body) throw new Error('改写响应为空');
-      return body;
+      return { text: body, usage: json?.usage || null };
     } finally {
       clearTimeout(timer);
     }
