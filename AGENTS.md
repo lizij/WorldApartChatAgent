@@ -124,6 +124,9 @@
   `ELECTRON_CACHE=<项目内目录>`（系统缓存目录在沙箱内不可写）、
   `ELECTRON_BUILDER_CACHE=<项目内目录>`、
   `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`。
+- GitHub Actions（[build-win.yml](.github/workflows/build-win.yml)）：push 到 `main` 自动构建并上传
+  artifact；打 `v<version>` tag 时校验 tag 与 `package.json` 版本一致，并把 exe 发到 Release。
+  CI 跑在 `windows-latest`，**不设上表的镜像变量**（Runner 直连）；exe 未签名，首次运行会有 SmartScreen 提示。
 - 零运行时第三方依赖；electron/electron-builder/esbuild 仅为开发依赖。
 
 ### 配置项（`data/config.json` 或 `data_test/config.json`，也可在页面编辑）

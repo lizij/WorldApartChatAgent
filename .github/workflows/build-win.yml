@@ -1,0 +1,66 @@
+name: build-win
+
+# push 到 main：构建并留存 artifact（验证可打包）；
+# 打 v* tag：额外发 GitHub Release，玩家可直接下载 exe。
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # 仅 tag 发布 Release 需要
+
+concurrency:
+  group: build-win-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # 产物只有 win portable x64，必须用 Windows runner（ubuntu 需要 wine）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      # 缓存目录放在仓库内，与 .gitignore 的 .eb-cache 一致，避免依赖 runner 的系统路径
+      ELECTRON_CACHE: ${{ github.workspace }}\.eb-cache\electron
+      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}\.eb-cache\electron-builder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 缓存 electron / electron-builder 下载
+        uses: actions/cache@v4
+        with:
+          path: .eb-cache
+          key: eb-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - run: npm ci
+
+      # 与本地一致：esbuild 打后端 + electron-builder 出 portable exe；
+      # scripts/dist.mjs 的数据备份/恢复在 CI 下无 releases/data* 目录，自动跳过。
+      - run: npm run dist:win
+
+      # package.json 是版本号单一来源；tag 与之一致才允许发版
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "tag ${{ github.ref_name }} 与 package.json 版本 v$v 不一致" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WorldApartNpcAgent-${{ github.sha }}
+          path: releases/*-win-portable.exe
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: releases/*-win-portable.exe
+          generate_release_notes: true
