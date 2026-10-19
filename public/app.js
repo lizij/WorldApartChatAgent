@@ -287,12 +287,20 @@ function renderDetail(d) {
             },
           ]
         : [];
-    const changedModules = modules.filter((m) => m.changed || m.status !== 'done');
-    const unchangedModules = modules.filter((m) => !m.changed && m.status === 'done');
+    const changedModules = modules.filter((m) => m.changed || m.repaired || m.status !== 'done');
+    const unchangedModules = modules.filter((m) => !m.changed && !m.repaired && m.status === 'done');
     const moduleHtml = changedModules
       .map(
         (m) => `<div class="rw-module">
-          <h6>模块 #${m.id ?? m.index}${m.id != null ? `（消息 #${m.index}）` : ''} · ${esc(m.title || '')} · ${m.status === 'done' ? '已改写' : '未改动（' + esc(m.error || '校验失败') + '）'}</h6>
+          <h6>模块 #${m.id ?? m.index}${m.id != null ? `（消息 #${m.index}）` : ''} · ${esc(m.title || '')} · ${
+            m.status === 'done'
+              ? m.repaired
+                ? m.changed
+                  ? '已改写（格式已修复）'
+                  : '格式已修复（内容未变）'
+                : '已改写'
+              : '未改动（' + esc(m.error || '校验失败') + '）'
+          }</h6>
           <p class="detail-note">${m.originalChars ?? '—'} 字 → ${m.rewrittenChars ?? '—'} 字 · 删除 ${m.removedCount ?? 0} 行 / 新增 ${m.addedCount ?? 0} 行</p>
           ${m.removed && m.removed.length ? `<p class="detail-note">删除的原文行：</p><pre class="detail-pre">${esc(m.removed.join('\n'))}</pre>` : ''}
           ${m.added && m.added.length ? `<p class="detail-note">新增/改写后的行：</p><pre class="detail-pre">${esc(m.added.join('\n'))}</pre>` : ''}
@@ -305,7 +313,7 @@ function renderDetail(d) {
     rewriteBlock = `
       <div class="detail-section">
         <h5>请求重写（实验性）· ${rwLabel}</h5>
-        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
         ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
         ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
         <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>

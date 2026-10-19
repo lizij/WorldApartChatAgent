@@ -810,6 +810,7 @@ export function createServer({ config, logger }) {
               tokens: rw.tokens || null,
               modules: rw.moduleCount,
               changedModules: rw.changedCount,
+              repairedModules: rw.repairedCount,
               failedModules: rw.failedCount,
               originalChars: rw.originalChars,
               rewrittenChars: rw.rewrittenChars,
@@ -819,20 +820,19 @@ export function createServer({ config, logger }) {
             };
             // 失败时也保留草稿，便于在详情里排查
             detailRewrite = rw;
+            for (const item of rw.items) {
+              if (!item.ok) warnings.push(`rewrite_failed:module${item.id}:${item.error}`);
+            }
             if (rw.ok) {
               const messages = body.messages.slice();
               for (const item of rw.items) {
-                if (!item.ok) {
-                  warnings.push(`rewrite_failed:module${item.id}:${item.error}`);
-                  continue;
-                }
-                if (!item.changed) continue;
+                if (!item.ok || !item.changed) continue;
                 messages[item.index] = { ...messages[item.index], content: item.rewritten };
                 injected.set(item.rewritten, 'game_rewritten');
               }
               body = { ...body, messages };
             } else {
-              warnings.push('rewrite_failed:' + (rw.error || 'unknown'));
+              warnings.push('rewrite_failed:' + (rw.error || 'all_modules_failed'));
             }
           } catch (err) {
             warnings.push('rewrite_failed:' + (err?.message || String(err)));
@@ -902,6 +902,7 @@ export function createServer({ config, logger }) {
               title: x.title,
               status: x.ok ? 'done' : 'failed',
               changed: !!x.changed,
+              repaired: !!x.repaired,
               error: x.error || null,
               originalChars: x.originalChars,
               rewrittenChars: x.rewrittenChars,
@@ -917,6 +918,7 @@ export function createServer({ config, logger }) {
             })),
             moduleCount: detailRewrite.moduleCount,
             changedCount: detailRewrite.changedCount,
+            repairedCount: detailRewrite.repairedCount,
             failedCount: detailRewrite.failedCount,
             originalChars: detailRewrite.originalChars,
             rewrittenChars: detailRewrite.rewrittenChars,

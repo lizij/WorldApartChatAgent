@@ -97,6 +97,97 @@ function formatContract(text) {
   return { section, schema: balancedJsonBlock(section) };
 }
 
+/**
+ * 用原 schema 覆盖草稿 schema：
+ *  - 字段名、层级、类型必须一致（草稿多出字段视为契约变更）；
+ *  - 原 schema 里的枚举串（含 `|`）一律还原，避免模型漏写某个取值；
+ *  - 非枚举的字符串/布尔/数字保留草稿值。
+ * @returns {{value:any}|{error:true}}
+ */
+function coverSchema(original, draft) {
+  if (Array.isArray(original) || Array.isArray(draft)) {
+    if (!Array.isArray(original) || !Array.isArray(draft) || original.length !== draft.length) {
+      return { error: true };
+    }
+    const out = [];
+    for (let i = 0; i < original.length; i += 1) {
+      const r = coverSchema(original[i], draft[i]);
+      if (r.error) return r;
+      out.push(r.value);
+    }
+    return { value: out };
+  }
+  if (original && typeof original === 'object') {
+    if (!draft || typeof draft !== 'object' || Array.isArray(draft)) return { error: true };
+    for (const key of Object.keys(draft)) {
+      if (!(key in original)) return { error: true };
+    }
+    const out = { ...draft };
+    for (const key of Object.keys(original)) {
+      if (!(key in out)) {
+        out[key] = original[key];
+        continue;
+      }
+      const r = coverSchema(original[key], out[key]);
+      if (r.error) return r;
+      out[key] = r.value;
+    }
+    return { value: out };
+  }
+  if (typeof original === 'string') {
+    if (typeof draft !== 'string') return { error: true };
+    return { value: original.includes('|') ? original : draft };
+  }
+  if (typeof original === 'boolean') return typeof draft === 'boolean' ? { value: draft } : { error: true };
+  if (typeof original === 'number') return typeof draft === 'number' ? { value: draft } : { error: true };
+  return { value: draft };
+}
+
+/** 去掉输出格式里的 JSON 块，便于比较“结构之外”的文本是否变化。 */
+function outsideSchema(text) {
+  const n = normalize(text);
+  const section = outputFormatSection(n);
+  const block = section ? balancedJsonBlock(section) : null;
+  return block ? n.replace(block, '') : n;
+}
+
+/**
+ * 校验并尽量修复输出格式：
+ *  - 结构无法对齐 → 返回错误，由调用方回退；
+ *  - 只是枚举漏值/字段缺失 → 用原 schema 补回，保留草稿里其它改写；
+ *  - 修复后与原模块完全等价（仅结构被补回）→ noop，不产生无意义的改写。
+ * @returns {{ok:true,text:string,repaired:boolean,noop?:boolean}|{ok:false,error:string}}
+ */
+function repairFormat(originalText, draftText) {
+  const ca = formatContract(originalText);
+  const cb = formatContract(draftText);
+  if (!ca) return { ok: true, text: draftText, repaired: false };
+  if (!cb) return { ok: false, error: 'rewrite_output_format_missing' };
+  if (!ca.schema) {
+    if (ca.section !== cb.section) return { ok: false, error: 'rewrite_output_format_changed' };
+    return { ok: true, text: draftText, repaired: false };
+  }
+  let oa;
+  let ob;
+  try {
+    oa = JSON.parse(ca.schema);
+    ob = JSON.parse(cb.schema);
+  } catch {
+    return { ok: false, error: 'rewrite_output_format_changed' };
+  }
+  const covered = coverSchema(oa, ob);
+  if (covered.error) return { ok: false, error: 'rewrite_output_format_changed' };
+  const schemaRestored = JSON.stringify(covered.value) === JSON.stringify(oa);
+  if (schemaRestored && outsideSchema(originalText) === outsideSchema(draftText)) {
+    // 草稿只是漏了枚举/字段，补回后与原模块等价：直接沿用原文，避免无意义改写。
+    return { ok: true, text: originalText, repaired: true, noop: true };
+  }
+  const semanticChanged = JSON.stringify(covered.value) !== JSON.stringify(ob);
+  if (!semanticChanged) return { ok: true, text: draftText, repaired: false };
+  const repairedBlock = JSON.stringify(covered.value, null, 2);
+  return { ok: true, text: draftText.replace(cb.schema, repairedBlock), repaired: true };
+}
+
 /** 模型偶尔会用代码围栏包裹结果，防御性剥掉。 */
 function stripFences(text) {
   let t = String(text || '').trim();
@@ -148,25 +239,16 @@ function moduleTitle(content) {
   return first.replace(/^[*#\s]+/, '').slice(0, 40) || '（无标题模块）';
 }
 
-/** 校验单个模块。不通过时返回错误字符串，由调用方回退该模块原文。 */
+/** 校验单个模块；能修复的格式问题先修复，不能修复才返回错误。 */
 function validateModule(original, rewritten) {
-  if (!rewritten.trim()) return 'rewrite_empty';
+  if (!rewritten.trim()) return { error: 'rewrite_empty' };
   const a = normalize(original);
   const b = normalize(rewritten);
-  const ca = formatContract(a);
-  const cb = formatContract(b);
-  if (ca && !cb) return 'rewrite_output_format_missing';
-  if (ca?.schema) {
-    // 只保护 JSON 结构（字段名、枚举、层级）；标题下的规则说明允许被删改。
-    if (!cb?.schema) return 'rewrite_output_format_missing';
-    if (ca.schema !== cb.schema) return 'rewrite_output_format_changed';
-  } else if (ca && cb && ca.section !== cb.section) {
-    // 极少数没有 JSON 结构可锚定的情况，退回整节比较。
-    return 'rewrite_output_format_changed';
-  }
-  if (a.length >= 200 && b.length < a.length * 0.3) return 'rewrite_too_short';
-  if (b.length > a.length * 1.5) return 'rewrite_too_long';
-  return null;
+  const fmt = repairFormat(a, b);
+  if (!fmt.ok) return { error: fmt.error };
+  if (a.length >= 200 && b.length < a.length * 0.3) return { error: 'rewrite_too_short' };
+  if (b.length > a.length * 1.5) return { error: 'rewrite_too_long' };
+  return { error: null, text: fmt.text, repaired: fmt.repaired, noop: !!fmt.noop };
 }
 
 /**
@@ -280,12 +362,22 @@ export class RequestRewriter {
       const items = list.map((s, id) => {
         const original = s.content;
         const parsedText = parsed.map?.get(id);
-        const invalid = parsed.error
-          ? parsed.error
-          : parsedText == null
-            ? 'rewrite_module_missing'
-            : validateModule(original, parsedText);
-        const effective = invalid ? original : parsedText;
+        let invalid = null;
+        let candidate = original;
+        let repaired = false;
+        if (parsed.error) {
+          invalid = parsed.error;
+        } else if (parsedText == null) {
+          invalid = 'rewrite_module_missing';
+        } else {
+          const check = validateModule(original, parsedText);
+          if (check.error) invalid = check.error;
+          else {
+            candidate = check.noop ? original : check.text;
+            repaired = !!check.repaired;
+          }
+        }
+        const effective = invalid ? original : candidate;
         const diff = lineDiff(original, effective);
         return {
           id,
@@ -296,6 +388,7 @@ export class RequestRewriter {
           original,
           draft: parsedText ?? null,
           rewritten: effective,
+          repaired,
           changed: normalize(original) !== normalize(effective),
           originalChars: original.length,
           rewrittenChars: effective.length,
@@ -305,6 +398,7 @@ export class RequestRewriter {
 
       const okCount = items.filter((x) => x.ok).length;
       const changedCount = items.filter((x) => x.ok && x.changed).length;
+      const repairedCount = items.filter((x) => x.ok && x.repaired).length;
       const failedCount = items.length - okCount;
       const status = parsed.error
         ? 'failed'
@@ -323,6 +417,7 @@ export class RequestRewriter {
         moduleCount: items.length,
         okCount,
         changedCount,
+        repairedCount,
         failedCount,
         originalChars: items.reduce((n, x) => n + x.originalChars, 0),
         rewrittenChars: items.reduce((n, x) => n + x.rewrittenChars, 0),
