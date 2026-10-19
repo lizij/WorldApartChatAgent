@@ -52,8 +52,13 @@ async function loadConfig() {
   $('#memInjectChars').value = c.memory.injectMaxChars;
   $('#sumEvery').value = c.memory.summarizer.everyTurns;
   $('#sumMaxChars').value = c.memory.summarizer.maxMemoryChars;
-  $('#styleEnabled').checked = !!c.style?.enabled;
-  $('#styleGlobal').value = c.style?.global || '';
+  $('#promptsEnabled').checked = !!c.prompts?.enabled;
+  $('#promptsGlobal').value = c.prompts?.global || '';
+  const rw = c.requestRewrite || {};
+  $('#rwEnabled').checked = !!rw.enabled;
+  $('#rwMaxTokens').value = rw.maxTokens ?? 6000;
+  $('#rwTimeout').value = rw.timeoutMs ?? 60000;
+  $('#rwTemperature').value = rw.temperature ?? 0.2;
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -94,15 +99,31 @@ $('#saveMemory').addEventListener('click', async () => {
   flashSaved('memSaved', '记忆设置已保存');
 });
 
-$('#saveStyle').addEventListener('click', async () => {
+$('#savePrompts').addEventListener('click', async () => {
   await api('/api/config', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      style: { enabled: $('#styleEnabled').checked, global: $('#styleGlobal').value },
+      prompts: { enabled: $('#promptsEnabled').checked, global: $('#promptsGlobal').value },
     }),
   });
-  flashSaved('styleSaved', '风格设置已保存');
+  flashSaved('promptsSaved', '提示词设置已保存');
+});
+
+$('#saveRewrite').addEventListener('click', async () => {
+  await api('/api/config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      requestRewrite: {
+        enabled: $('#rwEnabled').checked,
+        maxTokens: Number($('#rwMaxTokens').value) || 6000,
+        timeoutMs: Number($('#rwTimeout').value) || 60000,
+        temperature: Number($('#rwTemperature').value),
+      },
+    }),
+  });
+  flashSaved('rwSaved', '重写设置已保存');
 });
 
 function flashSaved(id, text) {
@@ -158,8 +179,10 @@ function originLabel(origin) {
   return (
     {
       game: '游戏原始',
+      game_rewritten: '游戏重写后',
       memory: '外置记忆',
-      style: '对话风格',
+      prompt: '外置提示词',
+      style: '外置提示词',
       format: '格式提醒',
       history: '历史对话',
       player: '玩家本轮',
@@ -217,12 +240,78 @@ function renderDetail(d) {
           <span class="token-usage-title">Token 用量</span>
           <span class="token-usage-total">${tk.estimated ? '≈' : ''}${fmtTok(tk.total)} tok</span>
           <span class="token-usage-source">${tk.estimated ? '字符估算' : '上游 usage'}</span>
+          ${
+            d.rewrite && d.rewrite.tokens && d.rewrite.tokens.total != null
+              ? `<span class="token-usage-source">另：重写 ${d.rewrite.tokens.estimated ? '≈' : ''}${fmtTok(d.rewrite.tokens.total)} tok</span>`
+              : ''
+          }
         </div>`
       : '';
 
-  return `
-    ${tokenLine}
-    ${error}
+  const rw = d.rewrite;
+  let rewriteBlock = '';
+  if (rw) {
+    const rwTok =
+      rw.tokens && rw.tokens.total != null
+        ? `${rw.tokens.estimated ? '≈' : ''}${fmtTok(rw.tokens.total)} tok`
+        : '—';
+    const rwMessages = (rw.messages || [])
+      .map(
+        (m) => `<div class="msg-item origin-internal">
+          <div class="msg-meta"><span class="msg-role">${esc(m.role)}</span><span class="msg-origin">${esc(originLabel(m.origin))}</span><span class="msg-origin">${m.chars != null ? m.chars + ' 字' : ''}</span></div>
+          <pre class="detail-pre">${esc(m.content || '')}</pre>
+        </div>`,
+      )
+      .join('');
+    const rwLabel =
+      rw.status === 'done'
+        ? '成功'
+        : rw.status === 'partial'
+          ? '部分成功（失败模块已回退原文）'
+          : '失败（已回退原文）';
+    const modules = Array.isArray(rw.modules)
+      ? rw.modules
+      : rw.originalSystem != null
+        ? [
+            {
+              index: 0,
+              title: '主 system',
+              status: rw.status,
+              changed: true,
+              original: rw.originalSystem,
+              rewritten: rw.rewrittenSystem,
+              removed: rw.removed,
+              added: rw.added,
+              removedCount: rw.removedCount,
+              addedCount: rw.addedCount,
+            },
+          ]
+        : [];
+    const changedModules = modules.filter((m) => m.changed || m.status !== 'done');
+    const unchangedModules = modules.filter((m) => !m.changed && m.status === 'done');
+    const moduleHtml = changedModules
+      .map(
+        (m) => `<div class="rw-module">
+          <h6>模块 #${m.index} · ${esc(m.title || '')} · ${m.status === 'done' ? '已改写' : '未改动（' + esc(m.error || '校验失败') + '）'}</h6>
+          <p class="detail-note">${m.originalChars ?? '—'} 字 → ${m.rewrittenChars ?? '—'} 字 · 删除 ${m.removedCount ?? 0} 行 / 新增 ${m.addedCount ?? 0} 行</p>
+          ${m.removed && m.removed.length ? `<p class="detail-note">删除的原文行：</p><pre class="detail-pre">${esc(m.removed.join('\n'))}</pre>` : ''}
+          ${m.added && m.added.length ? `<p class="detail-note">新增/改写后的行：</p><pre class="detail-pre">${esc(m.added.join('\n'))}</pre>` : ''}
+          ${m.original != null ? `<details class="rw-details"><summary>原始内容（${String(m.original).length} 字）</summary><pre class="detail-pre">${esc(m.original)}</pre></details>` : ''}
+          ${m.rewritten != null ? `<details class="rw-details"><summary>重写后内容（${String(m.rewritten).length} 字）</summary><pre class="detail-pre">${esc(m.rewritten)}</pre></details>` : ''}
+        </div>`,
+      )
+      .join('');
+    rewriteBlock = `
+      <div class="detail-section">
+        <h5>请求重写（实验性）· ${rwLabel}</h5>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
+        ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
+        ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
+        <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>
+      </div>`;
+  }
+
+  return `${tokenLine}${error}${rewriteBlock}
     <div class="detail-bar">
       <span class="detail-note">${esc(meta)}</span>
       <span class="detail-actions">
@@ -328,7 +417,24 @@ function renderLog(rec) {
           ${rec.slug ? `<span class="log-slug">${esc(rec.slug)}</span>${rec.variant ? `<span class="tag">变体 ${esc(rec.variant)}</span>` : ''}` : ''}
           ${rec.isNewNpc ? '<span class="tag">新建档</span>' : ''}
           ${rec.injectChars ? `<span>注入记忆 ${rec.injectChars} 字</span>` : ''}
-          ${rec.styleChars ? `<span>风格提示 ${rec.styleChars} 字</span>` : ''}
+          ${rec.promptChars || rec.styleChars ? `<span>外置提示词 ${rec.promptChars || rec.styleChars} 字</span>` : ''}
+          ${
+            rec.rewrite
+              ? `<span class="${rec.rewrite.status === 'done' ? '' : 'warn'}">重写${
+                  rec.rewrite.status === 'done'
+                    ? '成功'
+                    : rec.rewrite.status === 'partial'
+                      ? '部分成功'
+                      : '失败'
+                }${
+                  rec.rewrite.changedModules != null
+                    ? ` 改写 ${rec.rewrite.changedModules}/${rec.rewrite.modules} 模块`
+                    : ''
+                }${rec.rewrite.durationMs != null ? ' ' + rec.rewrite.durationMs + 'ms' : ''}${
+                  rec.rewriteTokens != null ? ' · ' + fmtTok(rec.rewriteTokens) + ' tok' : ''
+                }</span>`
+              : ''
+          }
           ${tokenTag(rec)}
           ${timing.map((x) => `<span>${x}</span>`).join('')}
           ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
@@ -449,7 +555,7 @@ async function loadNpcs() {
     const name = n.rawNames[0] || n.slug;
     const g = n.lastGame || {};
     div.innerHTML = `
-      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.styleChars ? '<span class="tag">专属风格</span>' : ''}</div>
+      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.promptChars ? '<span class="tag">个人提示词</span>' : ''}</div>
       <div class="sub">${n.turns} 轮 · ${g.relation ? esc(g.relation) + ' · ' : ''}${g.scene ? esc(g.scene) : ''} · ${new Date(n.lastSeen).toLocaleString('zh-CN', { hour12: false })}</div>`;
     div.addEventListener('click', () => {
       $$('.npc-item').forEach((x) => x.classList.remove('active'));
@@ -463,7 +569,7 @@ async function loadNpcs() {
 async function loadNpcDetail(slug, name) {
   const d = await api('/api/npcs/' + encodeURIComponent(slug));
   const g = d.state?.lastGame || {};
-  const st = d.style || { useGlobal: true, text: '' };
+  const st = d.prompt || { useGlobal: true, text: '' };
   const hasDraft = !!draftState && draftState.slug === slug;
   const convs = d.conversations
     .slice()
@@ -502,22 +608,22 @@ async function loadNpcDetail(slug, name) {
       <div class="act-row"><span class="saved-hint" id="memStatus"></span><button class="btn sm" id="memRewrite">AI 生成草稿</button></div>
       ${draftBlock}
     </div>
-    <h4>对话风格（本 NPC 专属，可结合上面的记忆来设定）</h4>
-    <label class="check small"><input type="checkbox" id="npcStyleUseGlobal" ${st.useGlobal !== false ? 'checked' : ''} /> 叠加全局提示词（取消勾选则只用本 NPC 提示词）</label>
-    <textarea id="npcStyleText" rows="4" placeholder="例如：性格更热情主动，会主动找话题寒暄；或更严肃寡言，只用短句……">${esc(st.text)}</textarea>
-    <div class="act-row"><button class="btn primary sm" id="saveNpcStyle">保存本 NPC 风格</button><span class="saved-hint" id="npcStyleSaved"></span></div>
+    <h4>个人提示词（本 NPC 专属，可写人物设定、口吻、尺度等一切内容）</h4>
+    <label class="check small"><input type="checkbox" id="npcPromptUseGlobal" ${st.useGlobal !== false ? 'checked' : ''} /> 叠加全局提示词（取消勾选则只用本 NPC 提示词）</label>
+    <textarea id="npcPromptText" rows="6" placeholder="例如：她其实早已认出玩家，只是装作不认识；性格更热情主动，会主动找话题；或更严肃寡言，只用短句……">${esc(st.text)}</textarea>
+    <div class="act-row"><button class="btn primary sm" id="saveNpcPrompt">保存本 NPC 提示词</button><span class="saved-hint" id="npcPromptSaved"></span></div>
     <h4>最近对话（最新在上）</h4>
     ${convs || '<p class="hint">暂无对话。</p>'}`;
-  $('#saveNpcStyle').addEventListener('click', async () => {
-    await api('/api/npcs/' + encodeURIComponent(slug) + '/style', {
+  $('#saveNpcPrompt').addEventListener('click', async () => {
+    await api('/api/npcs/' + encodeURIComponent(slug) + '/prompt', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        useGlobal: $('#npcStyleUseGlobal').checked,
-        text: $('#npcStyleText').value,
+        useGlobal: $('#npcPromptUseGlobal').checked,
+        text: $('#npcPromptText').value,
       }),
     });
-    flashSaved('npcStyleSaved', '已保存');
+    flashSaved('npcPromptSaved', '已保存');
     loadNpcs();
   });
 

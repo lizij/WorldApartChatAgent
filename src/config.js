@@ -100,11 +100,21 @@ export function defaults() {
         idleFlushMs: 300000, // 5 分钟无新请求即视为本段会话已结束（扫描周期固定 5 秒，不可配）
       },
     },
-    // 对话风格：玩家设定的演出提示（全局对所有 NPC 生效）。
-    // 逐 NPC 的专属提示与「是否叠加全局」存于 data/npcs/<slug>/style.json（见 memory/store.js）。
-    style: {
+    // 外置设定提示词：玩家设定的全局提示（对所有 NPC 生效），可涵盖人物设定、世界观、
+    // 口吻、尺度、长度等一切内容。逐 NPC 的个人提示与「是否叠加全局」存于
+    // data/npcs/<slug>/prompt.json（见 memory/store.js）。
+    // 旧版配置键为 style，加载时自动迁移（见 ConfigStore 构造函数）。
+    prompts: {
       enabled: true,
       global: '',
+    },
+    // 请求重写（实验性）：转发前额外调用一次上游，把游戏 system 中与本工具外置内容
+    // 冲突的部分删除或改写。默认关闭：每轮多一次 system 量级的输入+输出，首字延迟明显增加。
+    requestRewrite: {
+      enabled: false,
+      maxTokens: 6000,
+      timeoutMs: 60000,
+      temperature: 0.2,
     },
     log: {
       memorySize: 1000,
@@ -141,9 +151,20 @@ export class ConfigStore {
       existed = true;
     } catch {}
 
+    // 旧版 style → prompts 自动迁移（向后兼容，不丢玩家已填的全局提示词）。
+    // 两个键并存时以 prompts 为准，随后删除旧键，保持单一来源。
+    let migrated = false;
+    if (user && typeof user === 'object' && user.style && typeof user.style === 'object') {
+      if (!user.prompts || typeof user.prompts !== 'object') {
+        user.prompts = user.style;
+      }
+      delete user.style;
+      migrated = true;
+    }
+
     this.cfg = deepMerge(d, user);
     this.firstRun = !existed;
-    if (!existed) this.persist();
+    if (!existed || migrated) this.persist();
   }
 
   get() {

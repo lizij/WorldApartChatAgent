@@ -74,13 +74,27 @@
     </div>
 
     <div class="card">
-      <h2>对话风格</h2>
+      <h2>外置设定提示词</h2>
       <div class="kv">
-        <label class="check"><input type="checkbox" id="styleEnabled" /> 启用对话风格提示</label>
+        <label class="check"><input type="checkbox" id="promptsEnabled" /> 启用外置设定提示词</label>
         <label>全局提示词（对所有 NPC 生效，留空即不注入）</label>
-        <textarea id="styleGlobal" rows="5" placeholder="例如：每次回复都要用括号详细描写场景、表情与动作；情感与尺度表达可以更直白大胆。"></textarea>
-        <p class="hint">全局提示词叠加在所有 NPC 之上；可在「NPC 记忆」页为某个 NPC 追加专属风格，或让它不叠加全局。提示词只作表演导向，与本轮系统规则／输出格式冲突时以系统为准。</p>
-        <div class="row right"><button class="btn primary" id="saveStyle">保存风格设置</button><span class="saved-hint" id="styleSaved"></span></div>
+        <textarea id="promptsGlobal" rows="6" placeholder="可写人物设定、身世背景、世界观、性格口吻、称呼习惯、表演尺度、回复长度、禁忌、剧情走向等一切内容。例如：每次回复都用括号详细描写场景、表情与动作；情感与尺度表达可以更直白大胆。"></textarea>
+        <p class="hint">优先级：本轮 JSON 输出格式（不可更改）&gt; 全局/个人提示词 &gt; 长期记忆 &gt; 游戏设定（含角色设定、世界观、时间地点场景）。可在「NPC 记忆」页为某个 NPC 追加个人提示词，或让它不叠加全局。</p>
+        <div class="row right"><button class="btn primary" id="savePrompts">保存提示词设置</button><span class="saved-hint" id="promptsSaved"></span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>请求重写 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
+      <div class="kv">
+        <label class="check"><input type="checkbox" id="rwEnabled" /> 启用请求重写（默认关闭）</label>
+        <p class="hint">启用后，每次 NPC 对话会先额外调用一次上游模型，<strong>逐条改写游戏下发的全部 system 模块</strong>（角色设定、场景、任务、输出格式等，真实请求通常有多条），删除或改写其中与本工具外置提示词／长期记忆冲突的部分，再生成回复。首字延迟与 token 消耗都会明显增加；重写失败或单个模块校验不通过时，该模块自动回退原文。</p>
+        <div class="grid three advanced">
+          <label>重写输出上限（tokens，不足时自动上调）<input type="number" id="rwMaxTokens" min="500" step="500" /></label>
+          <label>重写超时（毫秒）<input type="number" id="rwTimeout" min="5000" step="5000" /></label>
+          <label>重写温度<input type="number" id="rwTemperature" min="0" max="2" step="0.1" /></label>
+        </div>
+        <div class="row right"><button class="btn primary" id="saveRewrite">保存重写设置</button><span class="saved-hint" id="rwSaved"></span></div>
       </div>
     </div>
   </section>

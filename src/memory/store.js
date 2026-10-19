@@ -4,7 +4,7 @@
  * data/npcs/<slug>/
  *   ├─ state.json          # 机器状态：身份、变体、最近游戏状态、轮次、摘要水位
  *   ├─ memory.md           # 长期记忆（异步摘要器维护，回复前注入模型）
- *   ├─ style.json          # 玩家为该 NPC 设定的对话风格（可选；回复前注入）
+ *   ├─ prompt.json         # 玩家为该 NPC 设定的个人提示词（可选；回复前注入）
  *   ├─ conversations.jsonl # 完整对话流水（只追加）
  *   └─ intake/<日期>.md    # system 原文快照（首见 / 内容变化时）
  *
@@ -149,36 +149,44 @@ export function backupMemory(memoryFile, slug) {
   return `backups/${name}`;
 }
 
-// —— 逐 NPC 对话风格（玩家设定，独立于长期记忆）——
-// data/npcs/<slug>/style.json = { useGlobal: boolean, text: string }
-//   text      该 NPC 的专属风格提示词（为空表示不设专属风格）
-//   useGlobal 是否在该 NPC 上叠加全局风格提示（false = 仅用专属提示，可用来让某角色豁免全局）
+// —— 逐 NPC 外置设定提示词（玩家设定，独立于长期记忆）——
+// data/npcs/<slug>/prompt.json = { useGlobal: boolean, text: string }
+//   text      该 NPC 的个人提示词（为空表示不设个人提示）
+//   useGlobal 是否在该 NPC 上叠加全局提示词（false = 仅用个人提示，可让某角色豁免全局）
+// 兼容旧版 style.json：读取时回退；保存时写入 prompt.json 并删除旧文件。
 
-export function npcStyleFile(slug) {
+export function npcPromptFile(slug) {
+  return path.join(npcDir(slug), 'prompt.json');
+}
+
+function legacyNpcStyleFile(slug) {
   return path.join(npcDir(slug), 'style.json');
 }
 
-export const DEFAULT_NPC_STYLE = { useGlobal: true, text: '' };
+export const DEFAULT_NPC_PROMPT = { useGlobal: true, text: '' };
 
-/** 读逐 NPC 对话风格；文件缺失/损坏时回退默认（叠加全局、无专属文本）。 */
-export function loadNpcStyle(slug) {
-  const v = readJson(npcStyleFile(slug), null);
-  if (!v || typeof v !== 'object') return { ...DEFAULT_NPC_STYLE };
+/** 读逐 NPC 提示词；文件缺失/损坏时回退默认（叠加全局、无个人文本）。 */
+export function loadNpcPrompt(slug) {
+  const v = readJson(npcPromptFile(slug), null) || readJson(legacyNpcStyleFile(slug), null);
+  if (!v || typeof v !== 'object') return { ...DEFAULT_NPC_PROMPT };
   return { useGlobal: v.useGlobal !== false, text: typeof v.text === 'string' ? v.text : '' };
 }
 
-/** 写逐 NPC 对话风格；处于默认态（无专属文本且叠加全局）时删除文件，保持目录干净。 */
-export function saveNpcStyle(slug, { useGlobal = true, text = '' } = {}) {
+/** 写逐 NPC 提示词；处于默认态（无个人文本且叠加全局）时删除文件，保持目录干净。 */
+export function saveNpcPrompt(slug, { useGlobal = true, text = '' } = {}) {
   const use = useGlobal !== false;
   const t = String(text || '').trim();
+  try {
+    fs.rmSync(legacyNpcStyleFile(slug), { force: true });
+  } catch {}
   if (!t && use) {
     try {
-      fs.rmSync(npcStyleFile(slug), { force: true });
+      fs.rmSync(npcPromptFile(slug), { force: true });
     } catch {}
-    return { ...DEFAULT_NPC_STYLE };
+    return { ...DEFAULT_NPC_PROMPT };
   }
   const out = { useGlobal: use, text: t };
-  fs.writeFileSync(npcStyleFile(slug), JSON.stringify(out, null, 2), 'utf8');
+  fs.writeFileSync(npcPromptFile(slug), JSON.stringify(out, null, 2), 'utf8');
   return out;
 }
 

@@ -17,23 +17,24 @@ import {
   saveState,
   appendConversations,
   sessionIdOf,
-  loadNpcStyle,
-  saveNpcStyle,
+  loadNpcPrompt,
+  saveNpcPrompt,
   backupMemory,
   writeMemory,
   NPCS_DIR,
 } from './memory/store.js';
-import { injectMemory, injectStyle } from './memory/inject.js';
+import { buildMemoryText, buildPromptsText, insertBeforeLastUser } from './memory/inject.js';
 import { Summarizer } from './memory/summarizer.js';
 import { MemoryRewriter } from './memory/rewriter.js';
+import { RequestRewriter } from './requestRewrite.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, messageText, sendJsonError, tokenUsage } from './upstream.js';
 import { KeyedQueue } from './locks.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
-/** 对话风格提示词字数上限（全局与逐 NPC 同一上限；防止误粘贴超长文本挤占 token）。 */
-const STYLE_MAX_CHARS = 4000;
+/** 外置提示词字数上限（全局与逐 NPC 同一上限；防止误粘贴超长文本挤占 token）。 */
+const PROMPT_MAX_CHARS = 4000;
 
 /** 「AI 修改记忆」一次性指令上限（字）。 */
 const MEMORY_EDIT_MAX_CHARS = 4000;
@@ -131,6 +132,22 @@ function buildDetailMessages(messages, injected) {
   });
 }
 
+/**
+ * 收集游戏下发的全部纯文本 system 模块（此时尚未注入外置内容）。
+ * 真实游戏会把设定拆成多条 system 消息，甚至与历史消息交错，因此必须全部处理。
+ */
+function collectGameSystemMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  const out = [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i];
+    if (!m || m.role !== 'system' || typeof m.content !== 'string') continue;
+    if (!m.content.trim()) continue;
+    out.push({ index: i, content: m.content });
+  }
+  return out;
+}
+
 function tokenFields(tokens) {
   return tokens ? { tokens } : {};
 }
@@ -211,6 +228,7 @@ export function createServer({ config, logger }) {
   const queues = new KeyedQueue();
   const summarizer = new Summarizer({ config, logger, queue: queues });
   const rewriter = new MemoryRewriter({ config, queue: queues });
+  const requestRewriter = new RequestRewriter({ config });
   const idleFlusher = new IdleFlusher({ config, logger, summarizer });
 
   function cfg() {
@@ -265,6 +283,8 @@ export function createServer({ config, logger }) {
           includeUsage: !!c.upstream.includeUsage,
         },
         memory: c.memory,
+        prompts: { enabled: !!c.prompts.enabled, hasGlobal: !!(c.prompts.global || '').trim() },
+        requestRewrite: { enabled: !!c.requestRewrite.enabled },
       }),
     );
   }
@@ -281,7 +301,8 @@ export function createServer({ config, logger }) {
           apiKeySet: !!c.upstream.apiKey,
         },
         memory: c.memory,
-        style: { enabled: !!c.style.enabled, global: c.style.global || '' },
+        prompts: { enabled: !!c.prompts.enabled, global: c.prompts.global || '' },
+        requestRewrite: c.requestRewrite,
         log: c.log,
       }),
     );
@@ -360,16 +381,30 @@ export function createServer({ config, logger }) {
         if (ifm !== undefined) safe.memory.summarizer.idleFlushMs = ifm;
       }
     }
-    if (patch.style) {
-      safe.style = {};
-      if (patch.style.enabled !== undefined) safe.style.enabled = !!patch.style.enabled;
+    // 外置设定提示词；旧版管理页仍传 style 时按别名处理（prompts 优先）
+    if (patch.prompts || patch.style) {
+      const src = patch.prompts && typeof patch.prompts === 'object' ? patch.prompts : patch.style;
+      safe.prompts = {};
+      if (src.enabled !== undefined) safe.prompts.enabled = !!src.enabled;
       // 允许空字符串（= 清空全局提示词），故不用 strIn（strIn 会把空值当未提供）
-      if (typeof patch.style.global === 'string') {
-        if (patch.style.global.length > STYLE_MAX_CHARS) {
-          return sendJsonError(res, 400, 'bad_request', `全局提示词过长（上限 ${STYLE_MAX_CHARS} 字）`);
+      if (typeof src.global === 'string') {
+        if (src.global.length > PROMPT_MAX_CHARS) {
+          return sendJsonError(res, 400, 'bad_request', `全局提示词过长（上限 ${PROMPT_MAX_CHARS} 字）`);
         }
-        safe.style.global = patch.style.global;
+        safe.prompts.global = src.global;
       }
+    }
+    // 请求重写（实验性）
+    if (patch.requestRewrite && typeof patch.requestRewrite === 'object') {
+      safe.requestRewrite = {};
+      const rw = patch.requestRewrite;
+      if (rw.enabled !== undefined) safe.requestRewrite.enabled = !!rw.enabled;
+      const mt = intIn(rw.maxTokens, 500, 32000);
+      if (mt !== undefined) safe.requestRewrite.maxTokens = mt;
+      const to = intIn(rw.timeoutMs, 1000, 600000);
+      if (to !== undefined) safe.requestRewrite.timeoutMs = to;
+      const temp = Number(rw.temperature);
+      if (Number.isFinite(temp)) safe.requestRewrite.temperature = Math.min(Math.max(temp, 0), 2);
     }
     config.update(safe);
     logger.append({ kind: 'config', status: 'updated' });
@@ -400,7 +435,7 @@ export function createServer({ config, logger }) {
       try {
         memoryChars = fs.statSync(path.join(dir, 'memory.md')).size;
       } catch {}
-      const style = loadNpcStyle(ent.name);
+      const prompt = loadNpcPrompt(ent.name);
       out.push({
         slug: ent.name,
         rawNames: state?.rawNames || [],
@@ -411,8 +446,8 @@ export function createServer({ config, logger }) {
         lastGame: state?.lastGame || null,
         conversationEntries: convCount,
         memoryBytes: memoryChars,
-        styleChars: style.text.trim().length,
-        styleUsesGlobal: style.useGlobal,
+        promptChars: prompt.text.trim().length,
+        promptUsesGlobal: prompt.useGlobal,
       });
     }
     out.sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
@@ -455,10 +490,10 @@ export function createServer({ config, logger }) {
       } catch {}
     }
     res.setHeader('content-type', 'application/json; charset=utf-8');
-    res.end(JSON.stringify({ slug, state, memory, style: loadNpcStyle(slug), conversations }));
+    res.end(JSON.stringify({ slug, state, memory, prompt: loadNpcPrompt(slug), conversations }));
   }
 
-  async function handlePutNpcStyle(req, res, slugRaw) {
+  async function handlePutNpcPrompt(req, res, slugRaw) {
     let slug;
     try {
       slug = decodeURIComponent(slugRaw);
@@ -478,13 +513,13 @@ export function createServer({ config, logger }) {
     if (!body || typeof body.text !== 'string') {
       return sendJsonError(res, 400, 'bad_request', 'text 缺失或类型错误');
     }
-    if (body.text.length > STYLE_MAX_CHARS) {
-      return sendJsonError(res, 400, 'bad_request', `提示词过长（上限 ${STYLE_MAX_CHARS} 字）`);
+    if (body.text.length > PROMPT_MAX_CHARS) {
+      return sendJsonError(res, 400, 'bad_request', `提示词过长（上限 ${PROMPT_MAX_CHARS} 字）`);
     }
-    const saved = saveNpcStyle(slug, { useGlobal: body.useGlobal !== false, text: body.text });
-    logger.append({ kind: 'config', status: 'updated', slug, styleChars: saved.text.length });
+    const saved = saveNpcPrompt(slug, { useGlobal: body.useGlobal !== false, text: body.text });
+    logger.append({ kind: 'config', status: 'updated', slug, promptChars: saved.text.length });
     res.setHeader('content-type', 'application/json; charset=utf-8');
-    res.end(JSON.stringify({ ok: true, style: saved }));
+    res.end(JSON.stringify({ ok: true, prompt: saved }));
   }
 
   // —— AI 修改记忆：一次性指令改写草稿 → 预览/编辑 → 备份后覆盖 ——
@@ -704,12 +739,23 @@ export function createServer({ config, logger }) {
 
     const memEnabled = !!c.memory.enabled;
     let bundle = null;
+    let memoryText = '';
+    let promptsText = '';
     let injectChars = 0;
-    let styleChars = 0;
+    let promptChars = 0;
     let snapshotChanged = false;
     const warnings = [];
-    // 记录注入内容 → 来源，用于日志详情标注「游戏原始 / 外置记忆 / 风格 / 格式提醒」
+    // 记录注入内容 → 来源，用于日志详情标注「游戏原始 / 游戏重写后 / 外置记忆 / 外置提示词 / 格式提醒」
     const injected = new Map();
+    let rewriteInfo = null;
+    let detailRewrite = null;
+    let rewriteTokens = null;
+
+    // 客户端断开时中止重写调用，避免白白消耗 token
+    const clientAc = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) clientAc.abort();
+    });
 
     try {
       if (memEnabled) {
@@ -722,34 +768,93 @@ export function createServer({ config, logger }) {
         } catch (err) {
           warnings.push('snapshot_failed:' + err.message);
         }
-        const inj = injectMemory(body, {
+        memoryText = buildMemoryText({
           memoryFile: bundle.memoryFile,
           state: bundle.state,
-          slug: info.slug,
           maxChars: c.memory.injectMaxChars,
         });
-        injectChars = inj.chars;
-        if (inj.chars) injected.set(inj.injectedText, 'memory');
-        body = { ...body, messages: inj.messages };
       }
 
-      // 对话风格：玩家设定的全局 + 逐 NPC 专属提示。独立于记忆开关，
-      // 插在记忆之后、格式提醒之前，确保游戏系统规则与输出格式仍是最后强调项。
-      if (c.style.enabled) {
+      // 外置设定提示词：玩家设定的全局 + 逐 NPC 个人提示词，独立于记忆开关。
+      if (c.prompts.enabled) {
         try {
-          const local = loadNpcStyle(info.slug);
-          const injStyle = injectStyle(body, {
-            global: local.useGlobal !== false ? c.style.global : '',
+          const local = loadNpcPrompt(info.slug);
+          promptsText = buildPromptsText({
+            global: local.useGlobal !== false ? c.prompts.global : '',
             npc: local.text,
           });
-          if (injStyle.chars) {
-            body = { ...body, messages: injStyle.messages };
-            styleChars = injStyle.chars;
-            injected.set(injStyle.injectedText, 'style');
-          }
         } catch (err) {
-          warnings.push('style_inject_failed:' + err.message);
+          warnings.push('prompt_load_failed:' + err.message);
         }
+      }
+
+      // 请求重写（实验性）：先改写游戏的全部 system 模块，再注入外置内容——
+      // 这样外置内容不会被模型二次改写，且注入位置仍在重写结果之后。
+      if (c.requestRewrite.enabled && (memoryText || promptsText)) {
+        const systems = collectGameSystemMessages(body.messages);
+        if (!systems.length) {
+          warnings.push('rewrite_skipped:no_text_system');
+        } else {
+          try {
+            const rw = await requestRewriter.rewrite({
+              slug: info.slug,
+              systems,
+              memoryText,
+              promptsText,
+              signal: clientAc.signal,
+            });
+            rewriteTokens = rw.tokens?.total ?? null;
+            rewriteInfo = {
+              status: rw.status,
+              durationMs: rw.durationMs,
+              tokens: rw.tokens || null,
+              modules: rw.moduleCount,
+              changedModules: rw.changedCount,
+              failedModules: rw.failedCount,
+              originalChars: rw.originalChars,
+              rewrittenChars: rw.rewrittenChars,
+              removedLines: rw.removedCount,
+              addedLines: rw.addedCount,
+              ...(rw.error ? { error: rw.error } : {}),
+            };
+            // 失败时也保留草稿，便于在详情里排查
+            detailRewrite = rw;
+            if (rw.ok) {
+              const messages = body.messages.slice();
+              for (const item of rw.items) {
+                if (!item.ok) {
+                  warnings.push(`rewrite_failed:module${item.id}:${item.error}`);
+                  continue;
+                }
+                if (!item.changed) continue;
+                messages[item.index] = { ...messages[item.index], content: item.rewritten };
+                injected.set(item.rewritten, 'game_rewritten');
+              }
+              body = { ...body, messages };
+            } else {
+              warnings.push('rewrite_failed:' + (rw.error || 'unknown'));
+            }
+          } catch (err) {
+            warnings.push('rewrite_failed:' + (err?.message || String(err)));
+            rewriteInfo = {
+              status: 'failed',
+              durationMs: null,
+              error: err?.message || String(err),
+            };
+          }
+        }
+      }
+
+      // 注入顺序：记忆 → 外置提示词（后者更靠近玩家本轮，权重更高）
+      if (memoryText) {
+        body = { ...body, messages: insertBeforeLastUser(body.messages, memoryText) };
+        injectChars = memoryText.length;
+        injected.set(memoryText, 'memory');
+      }
+      if (promptsText) {
+        body = { ...body, messages: insertBeforeLastUser(body.messages, promptsText) };
+        promptChars = promptsText.length;
+        injected.set(promptsText, 'prompt');
       }
 
       // 格式强化：实测 flash 偶发不遵守「## 输出格式」而回纯文本。
@@ -783,6 +888,43 @@ export function createServer({ config, logger }) {
       usage: null,
       tokens: null,
       timing: {},
+      rewrite: detailRewrite
+        ? {
+            status: detailRewrite.status,
+            request: detailRewrite.request,
+            messages: (detailRewrite.messages || []).map((m) => {
+              const content = messageText(m);
+              return { role: m.role, origin: 'internal', content, chars: content.length };
+            }),
+            modules: (detailRewrite.items || []).map((x) => ({
+              index: x.index,
+              title: x.title,
+              status: x.ok ? 'done' : 'failed',
+              changed: !!x.changed,
+              error: x.error || null,
+              originalChars: x.originalChars,
+              rewrittenChars: x.rewrittenChars,
+              removed: x.removed,
+              added: x.added,
+              removedCount: x.removedCount,
+              addedCount: x.addedCount,
+              // 只保留变化/失败模块的全文；未改动模块的原文仍在最终 messages 里
+              original: x.changed || !x.ok ? x.original : null,
+              rewritten: x.changed || !x.ok ? x.rewritten : null,
+            })),
+            moduleCount: detailRewrite.moduleCount,
+            changedCount: detailRewrite.changedCount,
+            failedCount: detailRewrite.failedCount,
+            originalChars: detailRewrite.originalChars,
+            rewrittenChars: detailRewrite.rewrittenChars,
+            removedCount: detailRewrite.removedCount,
+            addedCount: detailRewrite.addedCount,
+            usage: detailRewrite.usage || null,
+            tokens: detailRewrite.tokens || null,
+            timing: { durationMs: detailRewrite.durationMs },
+            error: detailRewrite.error || null,
+          }
+        : null,
       error: null,
     };
 
@@ -796,7 +938,9 @@ export function createServer({ config, logger }) {
           ...baseLog,
           status: 'error',
           injectChars,
-          styleChars,
+          promptChars,
+          rewrite: rewriteInfo,
+          rewriteTokens,
           warnings,
           durationMs: Date.now() - started,
           error: detail.error,
@@ -828,7 +972,9 @@ export function createServer({ config, logger }) {
         status: result.ok ? 'done' : 'upstream_error',
         upstreamStatus: result.status,
         injectChars,
-        styleChars,
+        promptChars,
+        rewrite: rewriteInfo,
+        rewriteTokens,
         isNewNpc: bundle?.isNew || false,
         snapshotChanged,
         warnings,
@@ -949,8 +1095,9 @@ export function createServer({ config, logger }) {
         }
         if (normPath === '/api/events' && req.method === 'GET') return handleEvents(req, res);
         if (normPath === '/api/npcs' && req.method === 'GET') return handleNpcList(req, res);
-        const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/style$/);
-        if (ms && req.method === 'PUT') return await handlePutNpcStyle(req, res, ms[1]);
+        // 外置提示词：/prompt 为正式路由，/style 保留为旧版兼容别名
+        const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/(prompt|style)$/);
+        if (ms && req.method === 'PUT') return await handlePutNpcPrompt(req, res, ms[1]);
         const mr = normPath.match(/^\/api\/npcs\/([^/]+)\/memory\/rewrite$/);
         if (mr && req.method === 'POST') return await handleRewriteMemory(req, res, mr[1]);
         const mp = normPath.match(/^\/api\/npcs\/([^/]+)\/memory$/);
