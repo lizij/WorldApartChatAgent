@@ -897,6 +897,7 @@ export function createServer({ config, logger }) {
               return { role: m.role, origin: 'internal', content, chars: content.length };
             }),
             modules: (detailRewrite.items || []).map((x) => ({
+              id: x.id,
               index: x.index,
               title: x.title,
               status: x.ok ? 'done' : 'failed',
@@ -910,6 +911,8 @@ export function createServer({ config, logger }) {
               addedCount: x.addedCount,
               // 只保留变化/失败模块的全文；未改动模块的原文仍在最终 messages 里
               original: x.changed || !x.ok ? x.original : null,
+              // 失败时保留模型草稿，便于排查校验为什么没通过
+              draft: !x.ok ? x.draft : null,
               rewritten: x.changed || !x.ok ? x.rewritten : null,
             })),
             moduleCount: detailRewrite.moduleCount,

@@ -292,12 +292,13 @@ function renderDetail(d) {
     const moduleHtml = changedModules
       .map(
         (m) => `<div class="rw-module">
-          <h6>模块 #${m.index} · ${esc(m.title || '')} · ${m.status === 'done' ? '已改写' : '未改动（' + esc(m.error || '校验失败') + '）'}</h6>
+          <h6>模块 #${m.id ?? m.index}${m.id != null ? `（消息 #${m.index}）` : ''} · ${esc(m.title || '')} · ${m.status === 'done' ? '已改写' : '未改动（' + esc(m.error || '校验失败') + '）'}</h6>
           <p class="detail-note">${m.originalChars ?? '—'} 字 → ${m.rewrittenChars ?? '—'} 字 · 删除 ${m.removedCount ?? 0} 行 / 新增 ${m.addedCount ?? 0} 行</p>
           ${m.removed && m.removed.length ? `<p class="detail-note">删除的原文行：</p><pre class="detail-pre">${esc(m.removed.join('\n'))}</pre>` : ''}
           ${m.added && m.added.length ? `<p class="detail-note">新增/改写后的行：</p><pre class="detail-pre">${esc(m.added.join('\n'))}</pre>` : ''}
           ${m.original != null ? `<details class="rw-details"><summary>原始内容（${String(m.original).length} 字）</summary><pre class="detail-pre">${esc(m.original)}</pre></details>` : ''}
-          ${m.rewritten != null ? `<details class="rw-details"><summary>重写后内容（${String(m.rewritten).length} 字）</summary><pre class="detail-pre">${esc(m.rewritten)}</pre></details>` : ''}
+          ${m.draft != null ? `<details class="rw-details"><summary>模型草稿（未采用，${String(m.draft).length} 字）</summary><pre class="detail-pre">${esc(m.draft)}</pre></details>` : ''}
+          ${m.rewritten != null ? `<details class="rw-details"><summary>${m.status === 'done' ? '重写后内容' : '实际采用（已回退原文）'}（${String(m.rewritten).length} 字）</summary><pre class="detail-pre">${esc(m.rewritten)}</pre></details>` : ''}
         </div>`,
       )
       .join('');

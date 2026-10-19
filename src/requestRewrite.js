@@ -58,6 +58,45 @@ function outputFormatSection(text) {
   return m ? m[0].trim() : null;
 }
 
+/**
+ * 从输出格式节里提取第一个配平的 JSON 对象（忽略字符串内的花括号）。
+ * 游戏会把「最高优先级规则」等说明也塞在 `## 输出格式` 标题下，但它们不是解析契约；
+ * 真正必须逐字保留的只有这个 JSON 结构。
+ */
+function balancedJsonBlock(section) {
+  const start = section.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < section.length; i += 1) {
+    const ch = section[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return section.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** 输出格式契约：标题存在 + 其中的 JSON 结构。 */
+function formatContract(text) {
+  const section = outputFormatSection(text);
+  if (!section) return null;
+  return { section, schema: balancedJsonBlock(section) };
+}
+
 /** 模型偶尔会用代码围栏包裹结果，防御性剥掉。 */
 function stripFences(text) {
   let t = String(text || '').trim();
@@ -114,10 +153,17 @@ function validateModule(original, rewritten) {
   if (!rewritten.trim()) return 'rewrite_empty';
   const a = normalize(original);
   const b = normalize(rewritten);
-  const fa = outputFormatSection(a);
-  const fb = outputFormatSection(b);
-  if (fa && !fb) return 'rewrite_output_format_missing';
-  if (fa && fb && fa !== fb) return 'rewrite_output_format_changed';
+  const ca = formatContract(a);
+  const cb = formatContract(b);
+  if (ca && !cb) return 'rewrite_output_format_missing';
+  if (ca?.schema) {
+    // 只保护 JSON 结构（字段名、枚举、层级）；标题下的规则说明允许被删改。
+    if (!cb?.schema) return 'rewrite_output_format_missing';
+    if (ca.schema !== cb.schema) return 'rewrite_output_format_changed';
+  } else if (ca && cb && ca.section !== cb.section) {
+    // 极少数没有 JSON 结构可锚定的情况，退回整节比较。
+    return 'rewrite_output_format_changed';
+  }
   if (a.length >= 200 && b.length < a.length * 0.3) return 'rewrite_too_short';
   if (b.length > a.length * 1.5) return 'rewrite_too_long';
   return null;
@@ -248,6 +294,7 @@ export class RequestRewriter {
           ok: !invalid,
           error: invalid || null,
           original,
+          draft: parsedText ?? null,
           rewritten: effective,
           changed: normalize(original) !== normalize(effective),
           originalChars: original.length,
@@ -266,7 +313,7 @@ export class RequestRewriter {
           : okCount > 0
             ? 'partial'
             : 'failed';
-      const reply = items.map((x) => x.rewritten).join('\n');
+      const reply = items.map((x) => x.draft ?? x.rewritten).join('\n');
 
       return {
         ok: status !== 'failed',
