@@ -124,6 +124,16 @@ textarea:focus { border-color: var(--accent); }
 .badge.probe { background: #555; }
 .badge.server, .badge.config, .badge.auth { background: #6b5a28; }
 .badge.err { background: #8a3a3a; }
+select {
+  width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 7px 10px; font-size: 13px; outline: none;
+}
+select:focus { border-color: var(--accent); }
+.log-item.costar { border-left-color: var(--green); }
+.badge.costar { background: #2f6b4f; }
+.log-item.costar .log-slug { color: var(--green); }
+.msg-item.origin-cast { border-left-color: var(--cyan); }
+.cast-line { color: #bfe6cf; white-space: pre-wrap; }
 .log-slug { color: var(--accent); font-weight: 600; }
 .log-body { margin-top: 4px; }
 .log-line { color: var(--text); }

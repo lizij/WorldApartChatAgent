@@ -71,6 +71,20 @@
 - **优先级（重要）**：唯一不可覆盖的技术底线是**本轮 JSON 输出格式 / 必需字段 / 枚举取值**
   （否则游戏无法解析）；其下依次为 **全局/个人提示词 > 长期记忆 > 游戏下发的全部内容**
   （含角色设定、角色背景、世界观、表演尺度、时间地点场景）。注入文案与位置共同声明该层级。
+- **多 NPC 共演（实验性，默认关闭）**：玩家用括号把另一位**已有档案与 intake** 的 NPC 拉进
+  当前对话（`（章籽梦走进来）`、`章籽梦，你怎么看`、`（章籽梦离开了）`）。配角走**独立请求**：
+  用 B 自己的 intake 角色卡、B 的长期记忆、本工具账本里的共享对话、双方提示词构造；
+  主角的请求里只有“B 在场”与 B 的公开台词，**拿不到 B 的设定、记忆与心里活动**。
+  一轮最多 2 次**发言调用**：谁被点名谁先跑，后者看到前者输出再生成；超出预算的反应
+  顺延到玩家下一轮。B 的台词由系统插入 A 回复的 `content` 字符串内部（JSON 转义），
+  仍是单条 JSON、真流式（只对插入点做局部缓冲）。**B 先跑失败 → 整轮作废、不落盘**；
+  A 先说完后 B 失败 → B 缺席，不写任何“未接话”叙事。B 不产出 `emotion/control/intent`，
+  不参与游戏结算，也不得声称赠物、交易、关系或任务结果。B 写自己的记忆默认关闭。
+  共演开启时请求重写同样覆盖 B 的世界规则与角色卡（姓名/身份硬校验，失败只回退 B）。
+  **每个 NPC 需单独开启**（`data/npcs/<slug>/cast.json={enabled:true}`，默认关闭）：
+  未开启的 NPC 不参与任何共演判定，括号里的名字/台词只作为事实与导演指令。
+  调试可用显式指令 `/invite 名字`、`/remove 名字`（优先于括号，remove 优先，指令会从
+  发给模型的玩家文本里剥离；剥离后为空时模型看到“（玩家没有开口）”）。
 - **请求重写（实验性，默认关闭）**：开启后，NPC 对话在注入之前先额外调用一次上游，
   **逐条重写游戏下发的全部 system 模块**（真实请求通常拆成多条，且可能与历史消息交错），
   删除/改写与外置提示词、长期记忆冲突的描述；任一模块中 `## 输出格式` 里的 **JSON 结构**
@@ -148,6 +162,12 @@
 | `prompts.global` | 全局提示词（对所有 NPC 生效，留空不注入；上限 4000 字）。逐 NPC 个人提示与「是否叠加全局」存于 `data/npcs/<slug>/prompt.json`。旧键 `style` 会在启动时自动迁移为 `prompts` |
 | `requestRewrite.enabled` | **实验性**请求重写总开关（默认 `false`）。每轮 NPC 对话额外调用一次上游，逐条改写**全部**游戏 system 模块；额外 token 消耗与首字延迟明显增加 |
 | `requestRewrite.maxTokens/timeoutMs/temperature` | 重写调用参数：输出上限 6000（按模块总字数自动上调，最高 20000）/ 超时 60s / 温度 0.2；内部调用恒定 `thinking:{type:"disabled"}` |
+| `multiNpc.enabled` | **实验性**多 NPC 共演总开关（默认 `false`）。关闭时请求体与输出逐字节不变 |
+| `multiNpc.maxCoStars/maxCallsPerTurn` | 同场配角上限（默认 1）/ 一轮最多几次 NPC 发言调用（默认 2；1 = 只跑主角） |
+| `multiNpc.speakPolicy/outputStyle/allowASilence` | 配角开口策略 `addressed/always` / 多人输出格式 `script/inherit` / 允许主角只给在旁反应 |
+| `multiNpc.coStarWritesMemory` | 配角是否写入自己的长期记忆（默认 `false`） |
+| `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务/话题轮**退化单人戏（普通闲聊的 `## 任务：闲聊` 不算）/ 超时清场（30 分钟） |
+| `multiNpc.actorTailWaitMs/actorMaxTokens/actorTimeoutMs` | 主角先说完时等待配角的上限（3s）/ 配角输出上限（300 tokens）/ 配角调用超时（20s） |
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
 > 故有效上限 ≈ `maxTokens × 1.4`。上限若超过这个值，模型物理上写不出那么长——
@@ -176,6 +196,13 @@ WorldApartProject/
 │  ├─ identify.js             # 请求分类、slug 归一化、游戏状态提取（纯正则）
 │  ├─ upstream.js             # 上游转发：SSE 真流式直通 + Tee 捕获、非流式、超时
 │  ├─ requestRewrite.js       # 【实验性】请求重写：改写游戏 system、校验、行级 diff
+│  ├─ cast/                   # 【实验性】多 NPC 共演
+│  │  ├─ plan.js              # 指令解析结果 → 在场状态 → 谁先开口
+│  │  ├─ stage.js             # 括号入场/离场、正文点名、在场状态机
+│  │  ├─ registry.js          # 名字/别名 → slug 名册（60s 缓存）
+│  │  ├─ card.js              # 从 intake 抽取配角角色卡；A 是否认识 B
+│  │  ├─ actor.js             # 配角独立请求、输出清洗
+│  │  └─ merge.js             # 台词 JSON 转义 + 流内插入（content 内）
 │  ├─ locks.js                # 按 NPC 串行队列
 │  ├─ log.js                  # 环形缓冲（SSE 推送）+ 按天 JSONL
 │  └─ memory/
@@ -198,6 +225,9 @@ data/  或  data_test/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
    ├─ prompt.json             # 该 NPC 个人提示词 {useGlobal,text}（可选；回复前注入）
+   ├─ aliases.json            # 玩家可编辑的别名 {names:[]}（可选；共演点名识别用）
+   ├─ cast.json               # 是否允许作为配角参与共演 {enabled:true}（可选；缺失=关闭）
+   ├─ stage.json              # 共演在场状态 {sceneKey,onStage,updatedAt}（可选）
    ├─ conversations.jsonl     # 该 NPC 的完整会话历史（每轮玩家/NPC 各一条，只追加）
    ├─ backups/memory-<时间戳>.md # 「AI 修改记忆」保存前的时间戳备份（全部保留，可手工回滚）
    └─ intake/<时间>.md         # system 原文快照（首见或内容变化时）
@@ -287,7 +317,10 @@ data/  或  data_test/
 - `GET /api/events`：SSE，实时推送每条运行日志
 - `GET /api/logs?limit=`：最近日志（接口按时间正序返回；管理页展示时按时间倒序，最新在上）
 - `GET /api/logs/:rid/detail`：按日志的 `rid` 读取请求详情（完整 messages、reasoning、reply、usage；开启重写时含原始/重写后 system 与 diff；主日志只带 `hasDetail` 与 token 总数）
-- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、个人提示词与最近对话
+- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、个人提示词与最近对话（含 `stage`、`aliases`、`hasIntake`、`castEnabled`）
+- `GET/DELETE /api/npcs/:slug/stage`：查看 / 清空该 NPC 的共演在场状态
+- `PUT /api/npcs/:slug/aliases`：保存别名（`{names: string[]}`，≤20 条、每条 ≤20 字），用于识别玩家点名
+- `GET/PUT /api/npcs/:slug/cast`：查看 / 设置该 NPC 是否允许作为配角（`{enabled:boolean}`，默认关闭；无 intake 时拒绝启用）
 - `PUT /api/npcs/:slug/prompt`：保存该 NPC 个人提示词（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 prompt.json）。旧路由 `PUT /api/npcs/:slug/style` 保留为兼容别名
 - `POST /api/npcs/:slug/memory/rewrite`：按玩家一次性指令（`{prompt}`，上限 4000 字）用上游模型改写该 NPC 长期记忆，返回草稿 `{original,draft}`（**不落盘**；上游未配 Key 返 503）
 - `PUT /api/npcs/:slug/memory`：用草稿（`{text}`）覆盖该 NPC `memory.md`；覆盖前按时间戳备份到 `npcs/<slug>/backups/`，返回备份文件名
@@ -415,6 +448,61 @@ data/  或  data_test/
   若补回后与原模块等价则视为 noop，不产生无意义改写。详情新增「模型草稿（未采用）」
   与「格式已修复」标识。另修正：全部模块都失败时 warnings 也会带出每个模块的具体原因
   （此前只记 `unknown`）。
+
+- **多 NPC 共演（2026-10-21，0.7.0）**：新增 `src/cast/*` 与 `multiNpc` 配置、管理页卡片、
+  `stage.json` / `aliases.json`、日志 `kind:"costar"` 与 A/B 分色详情。用假上游做了端到端验证：
+  ① 单人对话逐字节不变（无共演块、无额外调用）；
+  ② 配角先开口（入场 + 点名）→ B 独立请求 → B 台词插入 A 回复的 `content` 开头 → 合并 JSON 合法；
+  ③ 配角在场但未被点名 → 不产生额外调用；
+  ④ A 先说完 → B 接话插入到 `content` 末尾；
+  ⑤ 任务轮自动退化为单人戏；
+  ⑥ B 先跑失败 → 502、整轮作废、A/B 账本与在场状态均未变；
+  ⑦ A 回复非 JSON → 配角先说时整轮作废，主角先说时丢弃 B 台词、原文返回；
+  ⑧ 逐字符分片 + 转义（引号/反斜杠/换行/`\u`）插入后仍是合法 JSON，B 看到的是解码后的 A 正文；
+  ⑨ 请求重写与共演同开：重写覆盖 B 的世界规则/角色卡，姓名与身份校验通过；
+  ⑩ 管理页浏览器实测：共演配置保存、日志分色与共演详情、别名保存后刷新仍在、清空在场生效。
+  B 写记忆默认关闭，测试档开启验证过 `speaker/via` 与 `turns` 推进。
+
+- **逐 NPC 共演开关 + 显式指令（2026-10-21，0.8.0）**：新增 `data/npcs/<slug>/cast.json`
+  （默认关闭）与 `GET/PUT /api/npcs/:slug/cast`、管理页逐 NPC 勾选。只有已开启且已有 intake
+  的 NPC 才参与共演；未开启的 NPC 在括号里被提到也只作为事实，不产生配角调用。
+  另新增 `/invite 名字`、`/remove 名字`：优先于括号、remove 优先、指令从模型输入中剥离
+  （剥离后为空时模型收到“（玩家没有开口）”），失败原因与指令记入日志。
+  假上游实测：未启用时括号不拉人；启用后 `（章籽梦说“……”）` 会拉人；`/invite`/`/remove`
+  生效且指令被剥离；同一句 remove 优先；关闭开关后在场 NPC 下一轮被请出、「本场变化」入
+  A 的上下文；管理页勾选保存后列表出现「共演已启用」，刷新不丢。
+
+- **普通闲聊被误判为任务轮（2026-10-21，0.8.1）**：真机日志 `cast_skipped:task` 出现在普通对话里，
+  但请求里只有 `## 任务：闲聊`（游戏给普通闲聊附带的默认任务模块），且当时**没有任何配角在场**。
+  原实现两处缺陷：① `skipOnTask` 用 `## 任务：` 一刀切；② 在解析在场状态**之前**就返回 skip，
+  导致每轮都记告警、`/invite`/`/remove` 在任务轮被丢弃。修复：只把
+  `## 本次话题` / `## 收尾判定` 或**标题不是“闲聊”**的 `## 任务：X` 视为真任务；
+  并把判定移到“配角确实在场”之后——没有配角时一律按普通单人轮（不告警）。
+  用触发该问题的真实请求（纪小花，37 条消息）回放验证：普通闲聊 B 正常参与且无告警；
+  追加 `## 本次话题` 或改成 `## 任务：采药` 才退化并记 `cast_skipped:task`。
+  同时修正配角台词前缀：一律使用 slug（`纪澜之：`），不再带 mod 全名与括号头衔。
+
+- **`/invite` 指令名吞掉正文（2026-10-21，0.8.2）**：真机输入
+  `（/invite 纪澜之）小花是不是光顾着自己…` 时，指令正则的名字捕获没有排除 `）`，
+  把 `纪澜之）小花是不是光顾着自己` 整段当成名字，查不到人 → `cast_command_rejected:…:unknown`，
+  纪澜之未入场。修复：名字捕获遇到空白、标点、括号/引号即结束；剥离指令后残留的空括号一并清理。
+  用真实 `纪小花` 档案回归 `planCast`：`/invite 纪澜之` 正确入场、无告警、
+  剥离后模型看到「小花是不是光顾着自己，妈妈都不疼了？」。
+
+- **配角台词在展示文本/账本里重复（2026-10-21，0.8.3）**：真机日志里 B 的台词出现两次。
+  根因：`result.assistantText` 取自**注入后**的内容（已含 B 的台词），重建分段时又拿它当 A 的正文
+  再拼一次 B → 展示文本、`conversations.jsonl`、日志详情、摘要材料全部重复。
+  修复：分段时 A 的正文改用 `castInjector.aContentText()`（注入前的原文）；
+  逐字符分片回归验证 head/tail 两种顺序均为「展示文本 = 分段拼接、B 只出现一次」。
+  同时修掉 B 台词的双重名字前缀：模型写成「（动作）纪澜之：台词」时不再补第二个「纪澜之：」。
+
+- **在场配角被提及却不开口（2026-10-21，0.8.4）**：真机 `seq=635~637`（纪小花为主角、纪澜之在场）里，
+  玩家写「（一把搂过纪澜之，继续亲吻）」，B 全程没有发言调用。根因：`speakPolicy=addressed`
+  只看了“点名”与“入场”，没有使用括号里的**动作提及**——而设计文档 §5.6 写明“玩家在括号里
+  给了 B 一个动作或台词指令”就该开口。修复：`planCast` 增加 `mentionedB`（在场配角被提及即算），
+  仅在场时生效（提及仍不会把人拉进场）；`X的/家` 这类所属描述不算提及；
+  「纪澜之」里的「澜之」按区间重叠过滤，避免短别名重复命中。只有真点名才让 B 抢先开口，
+  单纯提及默认 A 先说。日志详情新增 `cast.mentionedB`。
 
 ### 排障
 

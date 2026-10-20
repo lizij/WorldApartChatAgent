@@ -156,11 +156,25 @@ export class Summarizer {
     try {
       const oldMemory = loadMemory(bundle.memoryFile, 100000);
       const recent = recentConversations(bundle.convFile, cfg.recentEntries);
+      const hasCast = recent.some(
+        (e) => (Array.isArray(e.segments) && e.segments.length) || e.via === 'costar',
+      );
       const dialogue = recent
         .map((e) => {
           const isPlayer = e.role === 'player';
-          const who = isPlayer ? '玩家' : slug;
           const meta = e.game_time ? `（${e.game_time}${e.scene ? '·' + e.scene : ''}）` : '';
+          // 共演轮：按 segments 逐句渲染，并标注哪些是“同场他人”
+          if (Array.isArray(e.segments) && e.segments.length) {
+            return e.segments
+              .map((s) => {
+                const who = String(s.who || '').trim() || slug;
+                const other = who !== slug && who !== '玩家';
+                return `[${who}${other ? '（同场他人）' : ''}]${meta} ${String(s.text ?? '')}`;
+              })
+              .join('\n');
+          }
+          const who = e.speaker || (isPlayer ? '玩家' : slug);
+          const other = e.via === 'costar' && who !== slug && who !== '玩家';
           // 游戏设定：赠予方向恒为 NPC→玩家；gift_item 是该轮结算确认的赠出物。
           const gift =
             !isPlayer && typeof e.gift_item === 'string' && e.gift_item && e.gift_item !== 'none'
@@ -168,7 +182,7 @@ export class Summarizer {
               : '';
           // {GIFT} 是游戏占位符：能取到真名就替换成真名，否则去掉占位符——绝不把 {GIFT} 原样喂给模型。
           const text = String(e.content ?? '').replace(/\{GIFT\}/g, gift || '一件私物');
-          return `[${who}]${meta}${gift ? `（赠予玩家：${gift}）` : ''} ${text}`;
+          return `[${who}${other ? '（同场他人）' : ''}]${meta}${gift ? `（赠予玩家：${gift}）` : ''} ${text}`;
         })
         .join('\n');
 
@@ -176,6 +190,10 @@ export class Summarizer {
         `NPC：${slug}\n字数上限：${cfg.maxMemoryChars}\n\n` +
         `【已有记忆】\n${oldMemory || '（暂无）'}\n\n` +
         `【本轮游戏侧摘要（如有，视为已确认事实）】\n${stateSnapshot?.lastGame?.pastEvents || '（无）'}\n\n` +
+        (hasCast
+          ? '【同场说明】\n材料中标注「同场他人」的句子是别人说的话与做的事，不是你自己的言行；\n' +
+            '不要把别人的行为写进你的【赠予往来】【未了之事】；同场只值得记一句“同场：X”。\n\n'
+          : '') +
         `【新增对话】\n${dialogue || '（无）'}`;
 
       const usageList = [];

@@ -85,6 +85,38 @@
     </div>
 
     <div class="card">
+      <h2>多 NPC 共演 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
+      <div class="kv">
+        <label class="check"><input type="checkbox" id="castEnabled" /> 启用多 NPC 共演（默认关闭）</label>
+        <p class="hint">开启后，玩家可以用括号把另一位 NPC 拉进当前对话（如「（章籽梦走进来）章籽梦，你怎么看」）。配角会<strong>单独请求上游</strong>，主角只能看到配角的公开台词，不会拿到配角的设定与记忆。每轮最多 2 次发言调用；关闭时对原有对话零影响。<br />注意：只有在该 NPC 详情里勾选「允许作为配角参与共演」的 NPC 才会被邀请；默认全部关闭。调试也可直接发 <code>/invite 名字</code>、<code>/remove 名字</code>。</p>
+        <div class="grid three advanced">
+          <label>同场配角上限<input type="number" id="castMaxCoStars" min="1" max="2" step="1" /></label>
+          <label>每轮发言调用上限<input type="number" id="castMaxCalls" min="1" max="2" step="1" /></label>
+          <label>共享对话条数<input type="number" id="castTranscriptTurns" min="1" max="40" step="1" /></label>
+        </div>
+        <div class="grid three advanced">
+          <label>配角开口策略
+            <select id="castSpeakPolicy">
+              <option value="addressed">被点名才开口（推荐）</option>
+              <option value="always">在场每轮都接</option>
+            </select>
+          </label>
+          <label>多人输出格式
+            <select id="castOutputStyle">
+              <option value="script">剧本式（名字：台词）</option>
+              <option value="inherit">沿用第一人称</option>
+            </select>
+          </label>
+          <label>A 先说完后等配角（毫秒）<input type="number" id="castTailWait" min="500" step="500" /></label>
+        </div>
+        <label class="check"><input type="checkbox" id="castAllowSilence" /> 玩家点名配角时，允许主角只给在旁反应（不接话）</label>
+        <label class="check"><input type="checkbox" id="castWritesMemory" /> 配角写入自己的长期记忆（默认关闭）</label>
+        <label class="check"><input type="checkbox" id="castSkipOnTask" /> 任务 / 话题轮自动退化为单人戏</label>
+        <div class="row right"><button class="btn primary" id="saveCast">保存共演设置</button><span class="saved-hint" id="castSaved"></span></div>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>请求重写 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
       <div class="kv">
         <label class="check"><input type="checkbox" id="rwEnabled" /> 启用请求重写（默认关闭）</label>
@@ -106,6 +138,7 @@
         <div class="filters" id="kindFilters">
           <button class="chip active" data-kind="all">全部</button>
           <button class="chip" data-kind="npc">NPC 对话</button>
+          <button class="chip" data-kind="costar">配角</button>
           <button class="chip" data-kind="compressor">压缩器</button>
           <button class="chip" data-kind="summary">记忆压缩</button>
           <button class="chip" data-kind="memory_edit">记忆修改</button>

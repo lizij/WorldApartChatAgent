@@ -14,13 +14,17 @@ import { tokenUsage } from './upstream.js';
 
 const SYSTEM_PROMPT = [
   '你是游戏 NPC 对话请求的预处理器。游戏会把 NPC 的设定与规则拆成多条 system 模块',
-  '（角色设定、场景、任务、输出格式等）。玩家另外配置了一个外置 Agent：它会在请求中',
-  '额外注入「外置设定」和「外置长期记忆」。',
-  '你的任务是逐条检查这些模块，把其中与外置内容冲突的描述删除或改写，避免干扰模型扮演；',
-  '没有冲突的模块必须原样返回，不要润色。',
+  '（角色设定、场景、任务、输出格式等）；本工具还可能在同一次请求里附带**配角角色卡**',
+  '（世界规则 / 姓名 / 身份 / 说话习惯 / 性格）。两类模块的处理方式相同：',
+  '删改其中与外置设定、外置长期记忆冲突的描述。',
   '',
-  '【优先级】外置设定 > 外置长期记忆 > 游戏 system 中的全部内容。',
+  '【优先级】外置设定 > 外置长期记忆 > 待处理 system 模块中的全部内容。',
   '唯一例外：任何模块里出现的「## 输出格式」都是游戏解析回复的技术契约，必须逐字保留。',
+  '',
+  '【配角模块的额外限制】',
+  '1. 不得改动配角的**姓名与身份**（“姓名：X”“身份：…”这两行必须逐字保留）；',
+  '2. 只允许删除或改写性格、口吻、态度类描述，使其符合玩家的外置设定；',
+  '3. 不得给配角新增任何事实、关系、经历或剧情。',
   '',
   '【输出格式（必须严格遵守）】',
   '对输入的每一条模块，按原顺序输出下面这一对标记及其中内容：',
@@ -252,6 +256,20 @@ function validateModule(original, rewritten) {
 }
 
 /**
+ * 配角模块的校验：没有 `## 输出格式` 契约，但必须保住姓名与身份。
+ * @param {(original:string, rewritten:string)=>string|null} guard 返回错误码或 null
+ */
+function validateExtra(original, rewritten, guard) {
+  const base = validateModule(original, rewritten);
+  if (base.error) return base;
+  if (typeof guard === 'function') {
+    const err = guard(original, base.text);
+    if (err) return { error: err };
+  }
+  return base;
+}
+
+/**
  * 解析模型输出中的模块标记。
  * @returns {{map: Map<number,string>}|{error:string}}
  */
@@ -282,21 +300,28 @@ export class RequestRewriter {
   }
 
   /**
-   * 重写全部游戏 system 模块。
+   * 重写 system 模块。
+   * `systems` 是游戏下发的模块；`extras` 是本工具构造的模块（B 的世界规则 / 角色卡），
+   * 它们同样可以对照外置提示词与记忆做删改，但必须保住姓名与身份（由 guard 校验）。
    * 网络/上游错误直接抛出；解析/校验失败通过返回值表达，调用方按模块回退。
-   * @param {{slug?:string, systems:Array<{index:number,content:string}>, memoryText?:string, promptsText?:string, signal?:AbortSignal}} args
+   * @param {{slug?:string, systems:Array<{index:number,content:string}>, extras?:Array<{key:string,content:string,guard?:Function}>, memoryText?:string, promptsText?:string, signal?:AbortSignal}} args
    * @returns {Promise<object>}
    */
-  async rewrite({ slug, systems, memoryText = '', promptsText = '', signal } = {}) {
+  async rewrite({ slug, systems, extras = [], memoryText = '', promptsText = '', signal } = {}) {
     const started = Date.now();
     const c = this.config.requestRewrite;
     const up = this.config.upstream;
     if (up.insecureTLS) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
     const list = Array.isArray(systems) ? systems : [];
-    const totalChars = list.reduce((n, s) => n + normalize(s.content).length, 0);
+    const extraList = Array.isArray(extras) ? extras.filter((x) => x && typeof x.content === 'string') : [];
+    const all = [
+      ...list.map((s) => ({ content: s.content, group: 'game', index: s.index })),
+      ...extraList.map((x) => ({ content: x.content, group: 'cast', key: x.key, guard: x.guard })),
+    ];
+    const totalChars = all.reduce((n, s) => n + normalize(s.content).length, 0);
 
-    const blocks = list.map(
+    const blocks = all.map(
       (s, id) => `<<<SYSTEM id=${id}>>>\n${s.content}\n<<<END SYSTEM id=${id}>>>`,
     );
 
@@ -306,7 +331,7 @@ export class RequestRewriter {
         role: 'user',
         content: [
           `NPC：${slug || '（未知）'}`,
-          `游戏 system 模块数：${list.length}`,
+          `待处理 system 模块数：${all.length}（游戏 ${list.length} + 构造 ${extraList.length}）`,
           '',
           '【外置设定（最高优先级）】',
           promptsText || '（无）',
@@ -314,7 +339,7 @@ export class RequestRewriter {
           '【外置长期记忆】',
           memoryText || '（无）',
           '',
-          '【游戏 system 模块（逐条输出，保持 id 与顺序）】',
+          '【待处理 system 模块（逐条输出，保持 id 与顺序）】',
           blocks.join('\n\n'),
         ].join('\n'),
       },
@@ -358,8 +383,8 @@ export class RequestRewriter {
       const usage = json?.usage || null;
       const durationMs = Date.now() - started;
 
-      const parsed = parseModules(stripFences(raw), new Set(list.map((_, id) => id)));
-      const items = list.map((s, id) => {
+      const parsed = parseModules(stripFences(raw), new Set(all.map((_, id) => id)));
+      const items = all.map((s, id) => {
         const original = s.content;
         const parsedText = parsed.map?.get(id);
         let invalid = null;
@@ -370,7 +395,8 @@ export class RequestRewriter {
         } else if (parsedText == null) {
           invalid = 'rewrite_module_missing';
         } else {
-          const check = validateModule(original, parsedText);
+          const check =
+            s.group === 'cast' ? validateExtra(original, parsedText, s.guard) : validateModule(original, parsedText);
           if (check.error) invalid = check.error;
           else {
             candidate = check.noop ? original : check.text;
@@ -381,7 +407,9 @@ export class RequestRewriter {
         const diff = lineDiff(original, effective);
         return {
           id,
-          index: s.index,
+          group: s.group,
+          key: s.key || null,
+          index: s.index == null ? null : s.index,
           title: moduleTitle(original),
           ok: !invalid,
           error: invalid || null,

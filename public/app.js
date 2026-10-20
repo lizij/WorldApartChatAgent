@@ -59,6 +59,17 @@ async function loadConfig() {
   $('#rwMaxTokens').value = rw.maxTokens ?? 6000;
   $('#rwTimeout').value = rw.timeoutMs ?? 60000;
   $('#rwTemperature').value = rw.temperature ?? 0.2;
+  const cast = c.multiNpc || {};
+  $('#castEnabled').checked = !!cast.enabled;
+  $('#castMaxCoStars').value = cast.maxCoStars ?? 1;
+  $('#castMaxCalls').value = cast.maxCallsPerTurn ?? 2;
+  $('#castTranscriptTurns').value = cast.transcriptTurns ?? 8;
+  $('#castSpeakPolicy').value = cast.speakPolicy || 'addressed';
+  $('#castOutputStyle').value = cast.outputStyle || 'script';
+  $('#castTailWait').value = cast.actorTailWaitMs ?? 3000;
+  $('#castAllowSilence').checked = cast.allowASilence !== false;
+  $('#castWritesMemory').checked = !!cast.coStarWritesMemory;
+  $('#castSkipOnTask').checked = cast.skipOnTask !== false;
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -126,6 +137,44 @@ $('#saveRewrite').addEventListener('click', async () => {
   flashSaved('rwSaved', '重写设置已保存');
 });
 
+$('#saveCast').addEventListener('click', async () => {
+  const want = $('#castEnabled').checked;
+  if (want && !(statusCache?.multiNpc?.enabled)) {
+    const ok = window.confirm(
+      '多 NPC 共演是实验性功能，开启后：\n\n' +
+        '· 每轮可能多一次上游调用，token 消耗明显增加；\n' +
+        '· 玩家点名配角时，首字延迟约 +1~2 秒；\n' +
+        '· 配角的台词会显示在主角的气泡里（游戏只接受一条回复）。\n\n' +
+        '如果同时开启「请求重写」，token 与延迟会进一步叠加。\n\n确定开启吗？',
+    );
+    if (!ok) {
+      $('#castEnabled').checked = false;
+      return;
+    }
+  }
+  await api('/api/config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      multiNpc: {
+        enabled: want,
+        maxCoStars: Number($('#castMaxCoStars').value) || 1,
+        maxCallsPerTurn: Number($('#castMaxCalls').value) || 2,
+        transcriptTurns: Number($('#castTranscriptTurns').value) || 8,
+        speakPolicy: $('#castSpeakPolicy').value,
+        outputStyle: $('#castOutputStyle').value,
+        actorTailWaitMs: Number($('#castTailWait').value) || 3000,
+        allowASilence: $('#castAllowSilence').checked,
+        coStarWritesMemory: $('#castWritesMemory').checked,
+        skipOnTask: $('#castSkipOnTask').checked,
+      },
+    }),
+  });
+  flashSaved('castSaved', '共演设置已保存');
+  loadStatus();
+  loadConfig();
+});
+
 function flashSaved(id, text) {
   const el = $('#' + id);
   el.textContent = '✓ ' + text;
@@ -183,6 +232,7 @@ function originLabel(origin) {
       memory: '外置记忆',
       prompt: '外置提示词',
       style: '外置提示词',
+      cast: '共演现场',
       format: '格式提醒',
       history: '历史对话',
       player: '玩家本轮',
@@ -247,6 +297,34 @@ function renderDetail(d) {
           }
         </div>`
       : '';
+
+  const ca = d.cast;
+  let castBlock = '';
+  if (ca && (ca.coStar || ca.bLine || ca.messages?.length || ca.notes?.length || ca.commands?.length)) {
+    const bTok =
+      ca.tokens && ca.tokens.total != null
+        ? `${ca.tokens.estimated ? '≈' : ''}${fmtTok(ca.tokens.total)} tok`
+        : '—';
+    const bMessages = (ca.messages || [])
+      .map(
+        (m) => `<div class="msg-item origin-internal">
+          <div class="msg-meta"><span class="msg-role">${esc(m.role)}</span><span class="msg-origin">${esc(m.chars != null ? m.chars + ' 字' : '')}</span></div>
+          <pre class="detail-pre">${esc(m.content || '')}</pre>
+        </div>`,
+      )
+      .join('');
+    const orderText = ca.order === 'B' ? '配角先开口 → 主角后接' : '主角先开口 → 配角后接';
+    castBlock = `
+      <div class="detail-section">
+        <h5>共演 · 配角 ${esc(ca.coStar?.name || '（无）')}${ca.coStar?.slug ? `（${esc(ca.coStar.slug)}）` : ''}</h5>
+        ${ca.commands?.length ? `<p class="detail-note">指令：${esc(ca.commands.join('、'))}</p>` : ''}
+        ${ca.notes?.length ? `<p class="detail-note">本场变化：${esc(ca.notes.join(''))}</p>` : ''}
+        <p class="detail-note">${esc(orderText)} · 台词${ca.inserted ? '已插入' : '未插入'}${ca.slotFailed ? '（插槽定位失败）' : ''} · 配角台词 ${ca.bLineChars ?? 0} 字 · 耗时 ${ca.timing?.durationMs ?? '—'}ms · token ${bTok}${ca.error ? ` · ${esc(ca.error)}` : ''}</p>
+        ${ca.bLine ? `<pre class="detail-pre cast-line">${esc(ca.bLine)}</pre>` : '<p class="detail-note">（本轮配角未开口）</p>'}
+        ${bMessages ? `<details class="rw-details"><summary>配角请求（${(ca.messages || []).length} 条消息）</summary>${bMessages}</details>` : ''}
+        ${ca.reply ? `<details class="rw-details"><summary>配角原始回复（${String(ca.reply).length} 字）</summary><pre class="detail-pre">${esc(ca.reply)}</pre></details>` : ''}
+      </div>`;
+  }
 
   const rw = d.rewrite;
   let rewriteBlock = '';
@@ -320,7 +398,7 @@ function renderDetail(d) {
       </div>`;
   }
 
-  return `${tokenLine}${error}${rewriteBlock}
+  return `${tokenLine}${error}${castBlock}${rewriteBlock}
     <div class="detail-bar">
       <span class="detail-note">${esc(meta)}</span>
       <span class="detail-actions">
@@ -458,6 +536,19 @@ function renderLog(rec) {
     const act = rec.action === 'save' ? '保存记忆' : 'AI 改写记忆';
     body = `<div class="log-line">${esc(rec.slug || '')} ${act} ${rec.status === 'done' ? '完成' : '失败'}</div>
       <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+  } else if (rec.kind === 'costar') {
+    body = `<div class="log-line"><span class="who">配角：</span>${esc(rec.actor || '')} <span class="muted">（为 ${esc(rec.slug || '')} 配戏${
+      rec.turnId ? ' · ' + esc(String(rec.turnId).slice(-4)) : ''
+    }）</span></div>
+      ${rec.replyPreview ? `<div class="log-reply">${esc(rec.replyPreview)}</div>` : ''}
+      <div class="log-meta">
+        ${rec.order != null ? `<span>第 ${rec.order} 次</span>` : ''}
+        ${rec.mode ? `<span>${rec.mode === 'head' ? '配角先说' : '配角接话'}</span>` : ''}
+        ${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}
+        ${tokenTag(rec)}
+        ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
+        ${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}
+      </div>`;
   } else if (rec.kind === 'auth') {
     body = `<div class="log-line warn">鉴权失败：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
   } else {
@@ -564,7 +655,7 @@ async function loadNpcs() {
     const name = n.rawNames[0] || n.slug;
     const g = n.lastGame || {};
     div.innerHTML = `
-      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.promptChars ? '<span class="tag">个人提示词</span>' : ''}</div>
+      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.promptChars ? '<span class="tag">个人提示词</span>' : ''}${n.castEnabled ? '<span class="tag">共演已启用</span>' : ''}${(n.aliases || []).length ? '<span class="tag">别名 ' + n.aliases.length + '</span>' : ''}</div>
       <div class="sub">${n.turns} 轮 · ${g.relation ? esc(g.relation) + ' · ' : ''}${g.scene ? esc(g.scene) : ''} · ${new Date(n.lastSeen).toLocaleString('zh-CN', { hour12: false })}</div>`;
     div.addEventListener('click', () => {
       $$('.npc-item').forEach((x) => x.classList.remove('active'));
@@ -621,6 +712,21 @@ async function loadNpcDetail(slug, name) {
     <label class="check small"><input type="checkbox" id="npcPromptUseGlobal" ${st.useGlobal !== false ? 'checked' : ''} /> 叠加全局提示词（取消勾选则只用本 NPC 提示词）</label>
     <textarea id="npcPromptText" rows="6" placeholder="例如：她其实早已认出玩家，只是装作不认识；性格更热情主动，会主动找话题；或更严肃寡言，只用短句……">${esc(st.text)}</textarea>
     <div class="act-row"><button class="btn primary sm" id="saveNpcPrompt">保存本 NPC 提示词</button><span class="saved-hint" id="npcPromptSaved"></span></div>
+    <h4>共演：是否允许作为配角</h4>
+    <label class="check small"><input type="checkbox" id="npcCastEnabled" ${d.castEnabled ? 'checked' : ''} ${d.hasIntake ? '' : 'disabled'} /> 允许被邀请到其他 NPC 的对话中（默认关闭）</label>
+    <p class="hint">${d.hasIntake ? '只有勾选并保存后，玩家在括号里提到该 NPC 或用 /invite 才会把它拉进场。' : '该 NPC 没有 intake 存档，无法启用共演。'}</p>
+    <div class="act-row"><button class="btn primary sm" id="saveNpcCast">保存共演开关</button><span class="saved-hint" id="npcCastSaved"></span></div>
+    <h4>共演：在场状态</h4>
+    <p class="hint">${
+      d.stage?.onStage?.length
+        ? '当前在场：' + d.stage.onStage.map((x) => esc(x.name || x.slug)).join('、') + (d.stage.sceneKey ? '（' + esc(d.stage.sceneKey) + '）' : '')
+        : '当前没有配角在场。玩家可用括号把别的 NPC 拉进来。'
+    }</p>
+    ${d.hasIntake ? '' : '<p class="hint">该 NPC 没有 intake 存档（从未成功对话过），不能作为配角入场。</p>'}
+    <div class="act-row"><button class="btn sm" id="clearStage">清空在场</button><span class="saved-hint" id="stageSaved"></span></div>
+    <h4>共演：别名（每行一个，用于识别点名）</h4>
+    <textarea id="npcAliases" rows="3" placeholder="例如：梦儿&#10;小弦娘">${esc((d.aliases || []).join('\n'))}</textarea>
+    <div class="act-row"><button class="btn primary sm" id="saveAliases">保存别名</button><span class="saved-hint" id="aliasSaved"></span></div>
     <h4>最近对话（最新在上）</h4>
     ${convs || '<p class="hint">暂无对话。</p>'}`;
   $('#saveNpcPrompt').addEventListener('click', async () => {
@@ -634,6 +740,44 @@ async function loadNpcDetail(slug, name) {
     });
     flashSaved('npcPromptSaved', '已保存');
     loadNpcs();
+  });
+
+  $('#saveNpcCast').addEventListener('click', async () => {
+    try {
+      await api('/api/npcs/' + encodeURIComponent(slug) + '/cast', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ enabled: $('#npcCastEnabled').checked }),
+      });
+      flashSaved('npcCastSaved', '已保存');
+      loadNpcs();
+    } catch (err) {
+      $('#npcCastSaved').textContent = '保存失败：' + String(err.message || err);
+    }
+  });
+
+  $('#clearStage').addEventListener('click', async () => {
+    await api('/api/npcs/' + encodeURIComponent(slug) + '/stage', { method: 'DELETE' });
+    await loadNpcDetail(slug, name);
+    flashSaved('stageSaved', '已清空在场');
+  });
+
+  $('#saveAliases').addEventListener('click', async () => {
+    const names = $('#npcAliases')
+      .value.split(/[\n,，]/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    try {
+      await api('/api/npcs/' + encodeURIComponent(slug) + '/aliases', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ names }),
+      });
+      flashSaved('aliasSaved', '别名已保存');
+      loadNpcs();
+    } catch (err) {
+      $('#aliasSaved').textContent = '保存失败：' + String(err.message || err);
+    }
   });
 
   // AI 修改记忆：生成草稿

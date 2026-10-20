@@ -116,6 +116,33 @@ export function defaults() {
       timeoutMs: 60000,
       temperature: 0.2,
     },
+    // 多 NPC 共演（实验性）：默认关闭。开启后每轮可能多一次配角请求，
+    // token 与延迟都会增加；关闭时请求体与原先逐字节一致。
+    multiNpc: {
+      enabled: false,
+      // 同时在场配角上限（当前只验证 1 个）
+      maxCoStars: 1,
+      // 一轮内最多几次 NPC 发言调用（1 = 只跑主角 A）
+      maxCallsPerTurn: 2,
+      // addressed：被点名 / 新入场 / 括号给了 B 动作才开口；always：在场每轮都接
+      speakPolicy: 'addressed',
+      // script：多人场景统一「名字：台词」；inherit：保持 A 的第一人称
+      outputStyle: 'script',
+      // 玩家点名 B 时，A 可以只给一个在旁反应
+      allowASilence: true,
+      // B 是否写入自己的长期记忆（需求 3.6，默认关）
+      coStarWritesMemory: false,
+      transcriptTurns: 8,
+      // 检测到任务/话题模块时本轮退化为单人戏
+      skipOnTask: true,
+      // 超时自动清场（毫秒）
+      autoExitIdleMs: 1800000,
+      // A 先说完、B 接话时，尾部插槽最多等待多久（毫秒）
+      actorTailWaitMs: 3000,
+      // 配角调用参数
+      actorMaxTokens: 300,
+      actorTimeoutMs: 20000,
+    },
     log: {
       memorySize: 1000,
       maxDays: 14,

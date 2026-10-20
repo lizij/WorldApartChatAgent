@@ -21,6 +21,8 @@ import {
   saveNpcPrompt,
   backupMemory,
   writeMemory,
+  loadMemory,
+  recentConversations,
   NPCS_DIR,
 } from './memory/store.js';
 import { buildMemoryText, buildPromptsText, insertBeforeLastUser } from './memory/inject.js';
@@ -30,6 +32,12 @@ import { RequestRewriter } from './requestRewrite.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, messageText, sendJsonError, tokenUsage } from './upstream.js';
 import { KeyedQueue } from './locks.js';
+import { planCast } from './cast/plan.js';
+import { buildActorMessages, callActor, sanitizeActorText } from './cast/actor.js';
+import { renderCard } from './cast/card.js';
+import { ContentInjector } from './cast/merge.js';
+import { loadStage, saveStage } from './cast/stage.js';
+import { entryOf, loadAliases, saveAliases, saveCastFlag } from './cast/registry.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
@@ -177,6 +185,92 @@ function parseNpcReply(text) {
   return out;
 }
 
+function turnIdOf() {
+  return 't-' + Date.now().toString(36) + '-' + crypto.randomBytes(2).toString('hex');
+}
+
+/** 只读 NPC 的 state.json（不写盘，供共演预规划使用）。 */
+function readStateOf(slug) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(NPCS_DIR, slug, 'state.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/** 把一条对话记录渲染成 `[说话人] 内容`（共演条目按 segments 逐句）。 */
+function renderConvEntry(e, selfSlug) {
+  if (e && Array.isArray(e.segments) && e.segments.length) {
+    return e.segments.map((s) => `[${s.who || selfSlug}] ${s.text ?? ''}`).join('\n');
+  }
+  const who = e?.speaker || (e?.role === 'player' ? '玩家' : selfSlug);
+  return `[${who}] ${e?.content ?? ''}`;
+}
+
+function transcriptOf(convFile, limit, selfSlug) {
+  return recentConversations(convFile, limit).map((e) => renderConvEntry(e, selfSlug)).join('\n');
+}
+
+/** A 侧「本场现场」块。 */
+function buildCastBlock({ coStar, known, addressedB, outputStyle, aName }) {
+  const b = coStar.name;
+  const knownLine = known
+    ? `${b}你认得（你自己的记忆里提到过她）：${coStar.card.identity || '你记得这个人'}。`
+    : `${b}这个人你没见过，也没听人提过；她此刻却站在这里。`;
+  const lines = [
+    '【本场现场】',
+    knownLine,
+    '玩家括号里的动作与场景已经发生，你当场承接；括号里点名谁，谁就是本轮主要回应者。',
+  ];
+  if (addressedB) {
+    lines.push(
+      `本轮玩家转向${b}说话。你不必替她回答，也不必复述玩家对她说的内容；`,
+      '你可以只给一个在旁的动作或半句话，也可以自己也插一句，或者不接话。',
+    );
+  } else {
+    lines.push(
+      `本轮玩家主要对你说话。${b}在场，若她的动作或台词需要你回应，你可以自然接一句。`,
+    );
+  }
+  lines.push('', '【写法】');
+  if (outputStyle === 'script') {
+    lines.push(
+      `你只写你自己的台词：以「${aName}：」开头另起一行，动作用括号写在自己那句里。`,
+    );
+  } else {
+    lines.push('你只写你自己的台词与动作，不要替她写。');
+  }
+  lines.push(
+    `${b}的台词由她本人应答，你不要替她写，也不要给她留“台词位”。`,
+    '她不替玩家行动，也不替你决定；她不知道你私下的事。',
+    '可写 1~3 句，每句不超过 60 字；回应到点就停。',
+    `emotion、control 与 intent 只描述你自己（${aName}）。`,
+  );
+  return lines.join('\n');
+}
+
+/** A 侧观测块：B 先说话时追加，只给公开输出。 */
+function buildObservationBlock({ coStar, line }) {
+  return [
+    '【你刚才看到的】',
+    `${coStar.name}先开了口（她的原话，不是你的口吻）：`,
+    line,
+    '你看到了这些，但不知道她心里怎么想。',
+  ].join('\n');
+}
+
+/** 替换最后一条 user 消息的内容（共演指令剥离后使用）。 */
+function replaceLastUser(messages, content) {
+  const out = Array.isArray(messages) ? messages.slice() : [];
+  for (let i = out.length - 1; i >= 0; i -= 1) {
+    if (out[i]?.role === 'user') {
+      out[i] = { ...out[i], content };
+      break;
+    }
+  }
+  return out;
+}
+
 function serveStatic(req, res, pathname) {
   let rel = pathname === '/' ? '/index.html' : pathname;
   const file = path.normalize(path.join(PUBLIC_DIR, rel));
@@ -200,6 +294,8 @@ function serveStatic(req, res, pathname) {
       return;
     }
     res.setHeader('content-type', MIME[path.extname(file).toLowerCase()] || 'application/octet-stream');
+    // 管理页是本地单页应用：脚本/样式不做强缓存，避免升级后仍用旧 app.js
+    if (/\.(?:html|js|css)$/i.test(file)) res.setHeader('cache-control', 'no-cache');
     res.end(buf);
   });
 }
@@ -285,6 +381,12 @@ export function createServer({ config, logger }) {
         memory: c.memory,
         prompts: { enabled: !!c.prompts.enabled, hasGlobal: !!(c.prompts.global || '').trim() },
         requestRewrite: { enabled: !!c.requestRewrite.enabled },
+        multiNpc: {
+          enabled: !!c.multiNpc.enabled,
+          maxCoStars: c.multiNpc.maxCoStars,
+          maxCallsPerTurn: c.multiNpc.maxCallsPerTurn,
+          outputStyle: c.multiNpc.outputStyle,
+        },
       }),
     );
   }
@@ -303,6 +405,7 @@ export function createServer({ config, logger }) {
         memory: c.memory,
         prompts: { enabled: !!c.prompts.enabled, global: c.prompts.global || '' },
         requestRewrite: c.requestRewrite,
+        multiNpc: c.multiNpc,
         log: c.log,
       }),
     );
@@ -406,6 +509,31 @@ export function createServer({ config, logger }) {
       const temp = Number(rw.temperature);
       if (Number.isFinite(temp)) safe.requestRewrite.temperature = Math.min(Math.max(temp, 0), 2);
     }
+    // 多 NPC 共演（实验性）
+    if (patch.multiNpc && typeof patch.multiNpc === 'object') {
+      safe.multiNpc = {};
+      const m = patch.multiNpc;
+      if (m.enabled !== undefined) safe.multiNpc.enabled = !!m.enabled;
+      const co = intIn(m.maxCoStars, 1, 2);
+      if (co !== undefined) safe.multiNpc.maxCoStars = co;
+      const calls = intIn(m.maxCallsPerTurn, 1, 2);
+      if (calls !== undefined) safe.multiNpc.maxCallsPerTurn = calls;
+      if (m.speakPolicy === 'addressed' || m.speakPolicy === 'always') safe.multiNpc.speakPolicy = m.speakPolicy;
+      if (m.outputStyle === 'script' || m.outputStyle === 'inherit') safe.multiNpc.outputStyle = m.outputStyle;
+      for (const k of ['allowASilence', 'coStarWritesMemory', 'skipOnTask']) {
+        if (m[k] !== undefined) safe.multiNpc[k] = !!m[k];
+      }
+      const tt = intIn(m.transcriptTurns, 1, 40);
+      if (tt !== undefined) safe.multiNpc.transcriptTurns = tt;
+      const idle = intIn(m.autoExitIdleMs, 1000, 86400000);
+      if (idle !== undefined) safe.multiNpc.autoExitIdleMs = idle;
+      const tw = intIn(m.actorTailWaitMs, 500, 10000);
+      if (tw !== undefined) safe.multiNpc.actorTailWaitMs = tw;
+      const amt = intIn(m.actorMaxTokens, 80, 4000);
+      if (amt !== undefined) safe.multiNpc.actorMaxTokens = amt;
+      const ato = intIn(m.actorTimeoutMs, 1000, 600000);
+      if (ato !== undefined) safe.multiNpc.actorTimeoutMs = ato;
+    }
     config.update(safe);
     logger.append({ kind: 'config', status: 'updated' });
     res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -436,6 +564,7 @@ export function createServer({ config, logger }) {
         memoryChars = fs.statSync(path.join(dir, 'memory.md')).size;
       } catch {}
       const prompt = loadNpcPrompt(ent.name);
+      const reg = entryOf(ent.name);
       out.push({
         slug: ent.name,
         rawNames: state?.rawNames || [],
@@ -448,6 +577,9 @@ export function createServer({ config, logger }) {
         memoryBytes: memoryChars,
         promptChars: prompt.text.trim().length,
         promptUsesGlobal: prompt.useGlobal,
+        aliases: loadAliases(ent.name),
+        hasIntake: !!reg?.hasIntake,
+        castEnabled: !!reg?.castEnabled,
       });
     }
     out.sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
@@ -490,7 +622,19 @@ export function createServer({ config, logger }) {
       } catch {}
     }
     res.setHeader('content-type', 'application/json; charset=utf-8');
-    res.end(JSON.stringify({ slug, state, memory, prompt: loadNpcPrompt(slug), conversations }));
+    res.end(
+      JSON.stringify({
+        slug,
+        state,
+        memory,
+        prompt: loadNpcPrompt(slug),
+        conversations,
+        stage: loadStage(slug),
+        aliases: loadAliases(slug),
+        hasIntake: !!entryOf(slug)?.hasIntake,
+        castEnabled: !!entryOf(slug)?.castEnabled,
+      }),
+    );
   }
 
   async function handlePutNpcPrompt(req, res, slugRaw) {
@@ -520,6 +664,84 @@ export function createServer({ config, logger }) {
     logger.append({ kind: 'config', status: 'updated', slug, promptChars: saved.text.length });
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(JSON.stringify({ ok: true, prompt: saved }));
+  }
+
+  // —— 共演：在场状态与别名 ——
+
+  function handleGetStage(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, slug: hit.slug, stage: loadStage(hit.slug) }));
+  }
+
+  function handleDeleteStage(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    const stage = { sceneKey: null, onStage: [], updatedAt: Date.now() };
+    saveStage(hit.slug, stage);
+    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, action: 'stage_cleared' });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, slug: hit.slug, stage }));
+  }
+
+  async function handlePutAliases(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    if (!body || !Array.isArray(body.names)) {
+      return sendJsonError(res, 400, 'bad_request', 'names 缺失或不是数组');
+    }
+    if (body.names.length > 20 || body.names.some((x) => typeof x !== 'string' || x.length > 20)) {
+      return sendJsonError(res, 400, 'bad_request', '别名最多 20 条，每条不超过 20 字');
+    }
+    const names = saveAliases(hit.slug, body.names);
+    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, aliases: names.length });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, slug: hit.slug, names }));
+  }
+
+  function handleGetCast(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    const entry = entryOf(hit.slug);
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(
+      JSON.stringify({
+        ok: true,
+        slug: hit.slug,
+        enabled: !!entry?.castEnabled,
+        hasIntake: !!entry?.hasIntake,
+      }),
+    );
+  }
+
+  async function handlePutCast(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    if (!body || typeof body.enabled !== 'boolean') {
+      return sendJsonError(res, 400, 'bad_request', 'enabled 缺失或不是布尔值');
+    }
+    const entry = entryOf(hit.slug);
+    if (body.enabled && !entry?.hasIntake) {
+      return sendJsonError(res, 400, 'no_intake', '该 NPC 还没有 intake 存档（从未成功对话过），不能启用共演');
+    }
+    const saved = saveCastFlag(hit.slug, body.enabled);
+    // 关闭共演时，若该 NPC 正在别的 NPC 的在场列表里，立即请出（惰性生效，下轮请求会过滤）
+    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, castEnabled: saved.enabled });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, slug: hit.slug, ...saved }));
   }
 
   // —— AI 修改记忆：一次性指令改写草稿 → 预览/编辑 → 备份后覆盖 ——
@@ -738,11 +960,15 @@ export function createServer({ config, logger }) {
     }
 
     const memEnabled = !!c.memory.enabled;
+    const ms = c.multiNpc || {};
+    const castOn = !!ms.enabled;
+    const turnId = castOn ? turnIdOf() : null;
     let bundle = null;
     let memoryText = '';
     let promptsText = '';
     let injectChars = 0;
     let promptChars = 0;
+    let castChars = 0;
     let snapshotChanged = false;
     const warnings = [];
     // 记录注入内容 → 来源，用于日志详情标注「游戏原始 / 游戏重写后 / 外置记忆 / 外置提示词 / 格式提醒」
@@ -751,31 +977,194 @@ export function createServer({ config, logger }) {
     let detailRewrite = null;
     let rewriteTokens = null;
 
-    // 客户端断开时中止重写调用，避免白白消耗 token
+    // 客户端断开时中止重写 / 配角调用，避免白白消耗 token
     const clientAc = new AbortController();
     res.on('close', () => {
       if (!res.writableEnded) clientAc.abort();
     });
 
-    try {
-      if (memEnabled) {
-        bundle = openNpc(info.slug, info);
-        try {
-          if (c.memory.snapshotSystem) {
-            snapshotChanged = snapshotSystem(info.slug, info.system, bundle.state);
-            if (snapshotChanged) saveState(bundle.stateFile, bundle.state);
-          }
-        } catch (err) {
-          warnings.push('snapshot_failed:' + err.message);
+    // —— 共演预规划（只读，不落盘） ——
+    let cast = null;
+    let bCard = null;
+    let bActor = null; // { messages, result, line, order }
+    let castInjector = null;
+    let castMode = null; // 'head' | 'tail'
+    let castStage = null;
+    let castStageChanged = false;
+    let castNotes = [];
+    let castCommands = [];
+    let modelPlayerText = info.userText;
+
+    if (castOn) {
+      try {
+        const aMemory0 = memEnabled
+          ? loadMemory(path.join(NPCS_DIR, info.slug, 'memory.md'), c.memory.injectMaxChars)
+          : '';
+        cast = planCast({
+          info,
+          cfg: c,
+          aMemoryText: aMemory0,
+        });
+        if (cast) {
+          castNotes = cast.notes || [];
+          castCommands = cast.commands || [];
+          const clean = String(cast.cleanText ?? info.userText);
+          const blank = !clean.trim() || /^[\s，,。！？!?、]+$/.test(clean);
+          modelPlayerText = castCommands.length && blank ? '（玩家没有开口）' : clean;
         }
+        for (const w of cast?.warnings || []) warnings.push(w);
+        if (cast?.skip) {
+          // no_costar 是普通单人轮，不算告警
+          if (cast.skip !== 'no_costar') warnings.push('cast_skipped:' + cast.skip);
+          // 入场/离场仍要在本轮成功后落盘
+          castStage = cast.stage || null;
+          castStageChanged = !!cast.changed;
+          cast = null;
+        }
+        if (cast?.coStar) bCard = cast.coStar.card;
+        if (cast) {
+          castStage = cast.stage;
+          castStageChanged = !!cast.changed;
+        }
+      } catch (err) {
+        warnings.push('cast_plan_failed:' + (err?.message || String(err)));
+        cast = null;
+      }
+    }
+
+    if (modelPlayerText !== info.userText) {
+      body = { ...body, messages: replaceLastUser(body.messages, modelPlayerText) };
+    }
+
+    const aName = info.slug;
+    const castLog =
+      cast || castNotes.length || castCommands.length
+        ? {
+            turnId,
+            coStar: cast?.coStar?.slug || null,
+            coStarName: cast?.coStar?.name || null,
+            stage: (cast?.stage?.onStage || castStage?.onStage || []).map((x) => x.slug),
+            stageChanged: castStageChanged ? (cast?.left?.length || castNotes.some((n) => n.includes('离开')) ? 'leave' : 'enter') : null,
+            addressed: cast?.addressedB ? cast.coStar?.slug : null,
+            known: !!cast?.known,
+            order: cast?.order || null,
+            commands: castCommands.map((x) => `${x.action}:${x.name}`),
+            notes: castNotes,
+          }
+        : null;
+
+    const logBCall = ({ actor, order, mode, line }) => {
+      const result = actor?.result;
+      const tokens = tokenUsage({
+        usage: result?.usage,
+        messages: actor?.messages || [],
+        reply: result?.raw || '',
+      });
+      const detail = {
+        kind: 'costar',
+        turnId,
+        request: {
+          model: c.upstream.model,
+          stream: false,
+          temperature: 0.6,
+          max_tokens: Math.max(80, Number(ms.actorMaxTokens) || 300),
+          thinking: { type: 'disabled' },
+          messageCount: (actor?.messages || []).length,
+        },
+        messages: (actor?.messages || []).map((m) => {
+          const content = messageText(m);
+          return { role: m.role, origin: 'internal', content, chars: content.length };
+        }),
+        reasoning: '',
+        reasoningTruncated: false,
+        reply: result?.raw || '',
+        usage: result?.usage || null,
+        tokens,
+        timing: { durationMs: result?.durationMs ?? null },
+      };
+      logger.append(
+        {
+          kind: 'costar',
+          turnId,
+          actor: bCard?.name || cast?.coStar?.name || null,
+          role: 'costar',
+          slug: info.slug,
+          order,
+          mode,
+          spoke: !!line,
+          lineChars: line ? line.length : 0,
+          replyPreview: (line || result?.raw || '').slice(0, 300),
+          durationMs: result?.durationMs ?? null,
+          status: result?.ok ? 'done' : 'error',
+          ...(result?.error ? { error: result.error } : {}),
+          ...tokenFields(tokens),
+        },
+        detail,
+      );
+      return tokens;
+    };
+
+    /**
+     * 构造并调用配角。返回清洗后的台词（null = 不说话 / 失败）。
+     * @param {'head'|'tail'} mode
+     */
+    const runActor = async ({ mode, aContent = '' }) => {
+      if (!bCard) return { actor: null, line: null, tokens: null };
+      const bState = readStateOf(bCard.slug);
+      const bMemory = loadMemory(path.join(NPCS_DIR, bCard.slug, 'memory.md'), 800);
+      const bPrompt = c.prompts.enabled ? loadNpcPrompt(bCard.slug) : { useGlobal: true, text: '' };
+      const hist = transcriptOf(
+        path.join(NPCS_DIR, info.slug, 'conversations.jsonl'),
+        Math.max(1, Number(ms.transcriptTurns) || 8),
+        info.slug,
+      );
+      const lines = [hist, `[玩家] ${modelPlayerText}`];
+      if (mode === 'tail' && aContent) lines.push(`[${aName}] ${aContent}`);
+      const messages = buildActorMessages({
+        card: bCard,
+        memoryText: bMemory,
+        scene: info.state?.scene || '',
+        gameTime: info.state?.gameTime || '',
+        presentNames: [aName, bCard.name],
+        transcript: lines.filter(Boolean).join('\n'),
+        playerText: modelPlayerText,
+        globalPrompt: c.prompts.enabled && bPrompt.useGlobal !== false ? c.prompts.global || '' : '',
+        npcPrompt: c.prompts.enabled ? bPrompt.text || '' : '',
+      });
+      const actor = { messages, result: null, line: null, order: mode === 'head' ? 1 : 2 };
+      const result = await callActor({ config: c, messages, signal: clientAc.signal, label: 'costar' });
+      actor.result = result;
+      if (!result.ok) {
+        logger.append({
+          kind: 'costar',
+          turnId,
+          actor: bCard.name,
+          role: 'costar',
+          slug: info.slug,
+          order: actor.order,
+          mode,
+          status: 'error',
+          durationMs: result.durationMs,
+          error: result.error,
+        });
+        return { actor, line: null, tokens: null };
+      }
+      const line = sanitizeActorText(result.text, bCard.name);
+      actor.line = line;
+      const tokens = logBCall({ actor, order: actor.order, mode, line });
+      return { actor, line, tokens };
+    };
+
+    try {
+      // 1) 只读地准备 A 的记忆与提示词（供请求重写 / 共演块使用）
+      const aState0 = readStateOf(info.slug);
+      if (memEnabled) {
         memoryText = buildMemoryText({
-          memoryFile: bundle.memoryFile,
-          state: bundle.state,
+          memoryFile: path.join(NPCS_DIR, info.slug, 'memory.md'),
+          state: aState0,
           maxChars: c.memory.injectMaxChars,
         });
       }
-
-      // 外置设定提示词：玩家设定的全局 + 逐 NPC 个人提示词，独立于记忆开关。
       if (c.prompts.enabled) {
         try {
           const local = loadNpcPrompt(info.slug);
@@ -788,17 +1177,33 @@ export function createServer({ config, logger }) {
         }
       }
 
-      // 请求重写（实验性）：先改写游戏的全部 system 模块，再注入外置内容——
-      // 这样外置内容不会被模型二次改写，且注入位置仍在重写结果之后。
+      // 2) 请求重写（实验性）：先改写游戏 system 与配角构造模块，再注入外置内容
       if (c.requestRewrite.enabled && (memoryText || promptsText)) {
         const systems = collectGameSystemMessages(body.messages);
         if (!systems.length) {
           warnings.push('rewrite_skipped:no_text_system');
         } else {
+          const extras = [];
+          if (bCard) {
+            const nameLine = `姓名：${bCard.name}`;
+            const idLine = `身份：${bCard.identity}`;
+            const cardText = renderCard(bCard);
+            if (bCard.world) extras.push({ key: 'B_WORLD', content: bCard.world });
+            extras.push({
+              key: 'B_CARD',
+              content: cardText,
+              guard: (orig, rew) => {
+                if (!rew.includes(nameLine)) return 'rewrite_cast_name_changed';
+                if (idLine && idLine !== '身份：' && !rew.includes(idLine)) return 'rewrite_cast_identity_changed';
+                return null;
+              },
+            });
+          }
           try {
             const rw = await requestRewriter.rewrite({
               slug: info.slug,
               systems,
+              extras,
               memoryText,
               promptsText,
               signal: clientAc.signal,
@@ -826,11 +1231,18 @@ export function createServer({ config, logger }) {
             if (rw.ok) {
               const messages = body.messages.slice();
               for (const item of rw.items) {
+                if (item.group !== 'game') continue;
                 if (!item.ok || !item.changed) continue;
                 messages[item.index] = { ...messages[item.index], content: item.rewritten };
                 injected.set(item.rewritten, 'game_rewritten');
               }
               body = { ...body, messages };
+              // 配角模块：只更新通过的改写
+              for (const item of rw.items) {
+                if (item.group !== 'cast' || !item.ok || !item.changed || !bCard) continue;
+                if (item.key === 'B_WORLD') bCard.world = item.rewritten;
+                if (item.key === 'B_CARD') bCard.rendered = item.rewritten;
+              }
             } else {
               warnings.push('rewrite_failed:' + (rw.error || 'all_modules_failed'));
             }
@@ -845,7 +1257,47 @@ export function createServer({ config, logger }) {
         }
       }
 
-      // 注入顺序：记忆 → 外置提示词（后者更靠近玩家本轮，权重更高）
+      // 3) B 先说话：先跑 B，拿到公开台词后才请求 A
+      if (cast && cast.shouldBSpeak && cast.order === 'B') {
+        const r = await runActor({ mode: 'head' });
+        bActor = r.actor;
+        if (!r.actor || !r.actor.result?.ok) {
+          // 整轮作废：A 未被调用、不落盘
+          logger.append({
+            ...baseLog,
+            status: 'error',
+            cast: castLog,
+            warnings,
+            durationMs: Date.now() - started,
+            error: '配角请求失败，整轮作废',
+          });
+          return sendJsonError(res, 502, 'costar_failed', '配角请求失败，本轮已放弃（不会写入记忆）');
+        }
+        if (r.line) {
+          castMode = 'head';
+          castInjector = new ContentInjector({ mode: 'head', line: r.line });
+        }
+      }
+
+      // 4) A 侧建档与装配（B 成功后才动 A 的状态文件）
+      if (memEnabled) {
+        bundle = openNpc(info.slug, info);
+        try {
+          if (c.memory.snapshotSystem) {
+            snapshotChanged = snapshotSystem(info.slug, info.system, bundle.state);
+            if (snapshotChanged) saveState(bundle.stateFile, bundle.state);
+          }
+        } catch (err) {
+          warnings.push('snapshot_failed:' + err.message);
+        }
+        memoryText = buildMemoryText({
+          memoryFile: bundle.memoryFile,
+          state: bundle.state,
+          maxChars: c.memory.injectMaxChars,
+        });
+      }
+
+      // 注入顺序：记忆 → 外置提示词 → 共演现场 → 格式提醒
       if (memoryText) {
         body = { ...body, messages: insertBeforeLastUser(body.messages, memoryText) };
         injectChars = memoryText.length;
@@ -857,8 +1309,28 @@ export function createServer({ config, logger }) {
         injected.set(promptsText, 'prompt');
       }
 
+      if (cast || castNotes.length) {
+        const parts = [];
+        if (castNotes.length) parts.push('【本场变化】\n' + castNotes.join(''));
+        if (cast && bCard) {
+          parts.push(
+            buildCastBlock({
+              coStar: cast.coStar,
+              known: cast.known,
+              addressedB: cast.addressedB,
+              outputStyle: ms.outputStyle || 'script',
+              aName,
+            }),
+          );
+        }
+        if (bActor?.line) parts.push(buildObservationBlock({ coStar: cast.coStar, line: bActor.line }));
+        const block = parts.join('\n\n');
+        body = { ...body, messages: insertBeforeLastUser(body.messages, block) };
+        castChars = block.length;
+        injected.set(block, 'cast');
+      }
+
       // 格式强化：实测 flash 偶发不遵守「## 输出格式」而回纯文本。
-      // 在最后一条 user 消息前补一条极简提醒（不改动游戏原始消息），保持真流式。
       if (/##\s*输出格式/.test(info.system)) {
         const messages = body.messages.slice();
         let at = messages.length;
@@ -872,14 +1344,30 @@ export function createServer({ config, logger }) {
         injected.set(FORMAT_REMINDER, 'format');
         body = { ...body, messages };
       }
+
+      // 5) A 先说话、B 接话：尾部插槽，等 B 就绪后插入
+      if (cast && bCard && cast.shouldBSpeak && cast.order === 'A' && !castInjector) {
+        castMode = 'tail';
+        castInjector = new ContentInjector({
+          mode: 'tail',
+          waitMs: Math.max(500, Number(ms.actorTailWaitMs) || 3000),
+          getLine: async (aContent) => {
+            const r = await runActor({ mode: 'tail', aContent });
+            bActor = r.actor;
+            return r.line;
+          },
+        });
+      }
     } catch (err) {
       warnings.push('memory_init_failed:' + err.message);
       bundle = null;
+      castInjector = null;
     }
 
     const finalBody = prepareUpstreamBody(body, c);
     const detail = {
       kind: 'npc',
+      turnId,
       request: requestMeta(finalBody),
       messages: buildDetailMessages(finalBody.messages, injected),
       reasoning: '',
@@ -888,6 +1376,38 @@ export function createServer({ config, logger }) {
       usage: null,
       tokens: null,
       timing: {},
+      cast: (cast && bCard) || castNotes.length || castCommands.length
+        ? {
+            turnId,
+            coStar: cast && bCard ? { slug: bCard.slug, name: bCard.name } : null,
+            known: !!cast?.known,
+            addressedB: !!cast?.addressedB,
+            mentionedB: !!cast?.mentionedB,
+            order: cast?.order || null,
+            mode: castMode,
+            stage: ((cast?.stage || castStage)?.onStage || []).map((x) => x.slug),
+            stageChanged: castStageChanged ? 'yes' : 'no',
+            commands: castCommands.map((x) => `${x.action}:${x.name}`),
+            notes: castNotes,
+            blockChars: castChars,
+            bLine: bActor?.line || null,
+            bLineChars: bActor?.line?.length || 0,
+            inserted: !!castInjector?.inserted,
+            slotFailed: !!castInjector?.failed,
+            request: bActor?.messages ? requestMeta({ model: c.upstream.model, stream: false, messages: bActor.messages }) : null,
+            messages: (bActor?.messages || []).map((m) => {
+              const content = messageText(m);
+              return { role: m.role, origin: 'internal', content, chars: content.length };
+            }),
+            reply: bActor?.result?.raw || '',
+            usage: bActor?.result?.usage || null,
+            tokens: bActor?.result
+              ? tokenUsage({ usage: bActor.result.usage, messages: bActor.messages, reply: bActor.result.raw })
+              : null,
+            timing: { durationMs: bActor?.result?.durationMs ?? null },
+            error: bActor?.result?.error || null,
+          }
+        : null,
       rewrite: detailRewrite
         ? {
             status: detailRewrite.status,
@@ -898,6 +1418,8 @@ export function createServer({ config, logger }) {
             }),
             modules: (detailRewrite.items || []).map((x) => ({
               id: x.id,
+              group: x.group || 'game',
+              key: x.key || null,
               index: x.index,
               title: x.title,
               status: x.ok ? 'done' : 'failed',
@@ -935,7 +1457,10 @@ export function createServer({ config, logger }) {
 
     let result;
     try {
-      result = await forwardUpstream(finalBody, res, c);
+      result = await forwardUpstream(finalBody, res, c, {
+        injector: castInjector,
+        injectorMode: castMode || 'head',
+      });
     } catch (err) {
       detail.error = err?.message || String(err);
       logger.append(
@@ -944,6 +1469,8 @@ export function createServer({ config, logger }) {
           status: 'error',
           injectChars,
           promptChars,
+          cast: castLog,
+          castChars,
           rewrite: rewriteInfo,
           rewriteTokens,
           warnings,
@@ -956,19 +1483,73 @@ export function createServer({ config, logger }) {
       return;
     }
 
+    const parsedA = parseNpcReply(result.assistantText);
+    const bLine = castInjector?.bLine || bActor?.line || null;
+    // result.assistantText 来自注入后的内容，已包含 B 的台词；重建分段时必须用注入前的 A 正文，
+    // 否则 B 的台词会被重复写入展示文本、账本与摘要。
+    const aText = (castInjector?.inserted ? castInjector.aContentText() : '') || parsedA.content;
+    let finalContent = parsedA.content;
+    let segments = null;
+    if (cast && bCard && bLine) {
+      if (castMode === 'head' && castInjector?.inserted) {
+        segments = [
+          { who: bCard.name, text: bLine },
+          { who: aName, text: aText },
+        ];
+      } else if (castMode === 'tail' && castInjector?.inserted) {
+        segments = [
+          { who: aName, text: aText },
+          { who: bCard.name, text: bLine },
+        ];
+      }
+      if (segments) finalContent = segments.map((s) => s.text).join('\n');
+    }
+
+    if (cast && castInjector?.failed) warnings.push('costar_slot_missed');
+    if (cast && cast.shouldBSpeak && !bLine) warnings.push('costar_silent');
+
     const tokens = tokenUsage({
       usage: result.usage,
       messages: finalBody.messages,
-      reply: result.assistantText,
+      reply: finalContent,
       reasoning: result.reasoningText,
     });
     Object.assign(detail, {
       reasoning: result.reasoningText,
       reasoningTruncated: !!result.reasoningTruncated,
-      reply: result.assistantText,
+      reply: finalContent,
       usage: result.usage || null,
       tokens,
       timing: detailTiming(result),
+      ...(detail.cast
+        ? {
+            cast: {
+              ...detail.cast,
+              bLine,
+              bLineChars: bLine?.length || 0,
+              inserted: !!castInjector?.inserted,
+              slotFailed: !!castInjector?.failed,
+              segments: segments ? segments.map((s) => s.who) : [],
+              // A 先说话时，B 的请求要到流结束才存在：这里补全
+              request: bActor?.messages
+                ? requestMeta({ model: c.upstream.model, stream: false, messages: bActor.messages })
+                : detail.cast.request,
+              messages: bActor?.messages
+                ? bActor.messages.map((m) => {
+                    const content = messageText(m);
+                    return { role: m.role, origin: 'internal', content, chars: content.length };
+                  })
+                : detail.cast.messages,
+              reply: bActor?.result?.raw || detail.cast.reply,
+              usage: bActor?.result?.usage || detail.cast.usage,
+              tokens: bActor?.result
+                ? tokenUsage({ usage: bActor.result.usage, messages: bActor.messages, reply: bActor.result.raw })
+                : detail.cast.tokens,
+              timing: { durationMs: bActor?.result?.durationMs ?? detail.cast.timing?.durationMs ?? null },
+              error: bActor?.result?.error || detail.cast.error,
+            },
+          }
+        : {}),
     });
 
     logger.append(
@@ -978,6 +1559,8 @@ export function createServer({ config, logger }) {
         upstreamStatus: result.status,
         injectChars,
         promptChars,
+        cast: castLog,
+        castChars,
         rewrite: rewriteInfo,
         rewriteTokens,
         isNewNpc: bundle?.isNew || false,
@@ -987,32 +1570,47 @@ export function createServer({ config, logger }) {
         reasoningTtftMs: result.reasoningTtftMs,
         contentTtftMs: result.contentTtftMs,
         durationMs: Date.now() - started,
-        replyChars: result.assistantText.length,
-        replyPreview: result.assistantText.slice(0, 500),
+        replyChars: finalContent.length,
+        replyPreview: finalContent.slice(0, 500),
         ...tokenFields(tokens),
       },
       detail,
     );
 
-    if (!memEnabled || !bundle || !result.ok || !result.assistantText.trim()) return;
+    // —— 落盘：整轮成功后才提交在场状态与对话 ——
+    if (castStage && castStageChanged && result.ok) {
+      try {
+        saveStage(info.slug, castStage);
+      } catch (err) {
+        logger.append({ kind: 'costar', turnId, status: 'error', error: 'stage_save_failed:' + err.message });
+      }
+    }
+
+    if (!memEnabled || !bundle || !result.ok || !finalContent.trim()) return;
 
     queues
       .run('npc:' + info.slug, () => {
         const now = new Date().toISOString();
         const g = info.state || {};
-        const parsed = parseNpcReply(result.assistantText);
         const common = { ts: now, game_time: g.gameTime || null, scene: g.scene || null };
         appendConversations(bundle.convFile, [
-          { ...common, role: 'player', content: info.userText },
+          {
+            ...common,
+            role: 'player',
+            content: modelPlayerText,
+            ...(castCommands.length ? { command: info.userText } : {}),
+          },
           {
             ...common,
             role: 'npc',
-            content: parsed.content,
-            emotion: parsed.emotion,
-            control: parsed.control,
-            gift_item: parsed.giftItem,
-            reply_json_ok: parsed.jsonOk,
+            content: finalContent,
+            emotion: parsedA.emotion,
+            control: parsedA.control,
+            gift_item: parsedA.giftItem,
+            reply_json_ok: parsedA.jsonOk,
             variant: info.variant || null,
+            ...(segments ? { segments } : {}),
+            ...(segments ? { coStar: [bCard.slug] } : {}),
           },
         ]);
 
@@ -1033,6 +1631,40 @@ export function createServer({ config, logger }) {
         saveState(bundle.stateFile, state);
 
         summarizer.maybeRun(info.slug, bundle, state);
+
+        // 配角写记忆（默认关闭）：只写 B 在场且有发言的轮次，带 speaker
+        if (segments && bCard && ms.coStarWritesMemory) {
+          const bBundle = openNpc(bCard.slug, {});
+          appendConversations(bBundle.convFile, [
+            {
+              ...common,
+              role: 'player',
+              speaker: '玩家',
+              content: modelPlayerText,
+              via: 'costar',
+              with: [info.slug],
+            },
+            {
+              ...common,
+              role: 'npc',
+              speaker: bCard.name,
+              content: bLine,
+              via: 'costar',
+              with: [info.slug],
+            },
+          ]);
+          let bState;
+          try {
+            bState = JSON.parse(fs.readFileSync(bBundle.stateFile, 'utf8'));
+          } catch {
+            bState = bBundle.state;
+          }
+          bState.turns = (bState.turns || 0) + 1;
+          bState.lastSeen = now;
+          bState.lastGame = g;
+          saveState(bBundle.stateFile, bState);
+          summarizer.maybeRun(bCard.slug, bBundle, bState);
+        }
       })
       .catch((err) => {
         logger.append({ kind: 'memory_write', slug: info.slug, status: 'error', error: err?.message || String(err) });
@@ -1103,6 +1735,14 @@ export function createServer({ config, logger }) {
         // 外置提示词：/prompt 为正式路由，/style 保留为旧版兼容别名
         const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/(prompt|style)$/);
         if (ms && req.method === 'PUT') return await handlePutNpcPrompt(req, res, ms[1]);
+        const mstage = normPath.match(/^\/api\/npcs\/([^/]+)\/stage$/);
+        if (mstage && req.method === 'GET') return handleGetStage(req, res, mstage[1]);
+        if (mstage && req.method === 'DELETE') return handleDeleteStage(req, res, mstage[1]);
+        const malias = normPath.match(/^\/api\/npcs\/([^/]+)\/aliases$/);
+        if (malias && req.method === 'PUT') return await handlePutAliases(req, res, malias[1]);
+        const mcast = normPath.match(/^\/api\/npcs\/([^/]+)\/cast$/);
+        if (mcast && req.method === 'GET') return handleGetCast(req, res, mcast[1]);
+        if (mcast && req.method === 'PUT') return await handlePutCast(req, res, mcast[1]);
         const mr = normPath.match(/^\/api\/npcs\/([^/]+)\/memory\/rewrite$/);
         if (mr && req.method === 'POST') return await handleRewriteMemory(req, res, mr[1]);
         const mp = normPath.match(/^\/api\/npcs\/([^/]+)\/memory$/);

@@ -155,13 +155,16 @@ function createSseCapture() {
 
 /**
  * 转发并直通响应。
- * @returns {Promise<{status:number, ok:boolean, isStream:boolean, assistantText:string, reasoningText:string, usage:object|null, reasoningTruncated:boolean, ttftMs:number, reasoningTtftMs:number, contentTtftMs:number, durationMs:number}>}
+ * @param {object} options
+ * @param {object} [options.injector] 共演台词注入器（ContentInjector）：有它时启用流内改写，其余情况逐字节直通
+ * @param {'head'|'tail'} [options.injectorMode]
+ * @returns {Promise<{status:number, ok:boolean, isStream:boolean, assistantText:string, reasoningText:string, usage:object|null, reasoningTruncated:boolean, ttftMs:number, reasoningTtftMs:number, contentTtftMs:number, durationMs:number, injected:boolean}>}
  */
 export async function forwardUpstream(
   body,
   clientRes,
   config,
-  { onFirstByte, onFirstContent, onFirstReasoning } = {},
+  { onFirstByte, onFirstContent, onFirstReasoning, injector = null, injectorMode = 'head' } = {},
 ) {
   const up = config.upstream;
   const url = upstreamChatUrl(up.baseUrl);
@@ -212,7 +215,9 @@ export async function forwardUpstream(
       clientRes.setHeader('connection', 'keep-alive');
       clientRes.setHeader('x-accel-buffering', 'no');
     }
-    if (typeof clientRes.flushHeaders === 'function') clientRes.flushHeaders();
+    // head 模式要先确认能定位 content 再发头，避免失败时已经 flush 无法回错误
+    const delayHeaders = !!injector && injectorMode === 'head';
+    if (!delayHeaders && typeof clientRes.flushHeaders === 'function') clientRes.flushHeaders();
 
     const touchIdle = () => {
       if (idleTimer) clearTimeout(idleTimer);
@@ -227,6 +232,8 @@ export async function forwardUpstream(
     let ttftMs = null;
     let reasoningTtftMs = null;
     let contentTtftMs = null;
+    let headersFlushed = !delayHeaders;
+    let injected = false;
     const markFirst = () => {
       if (ttftMs == null) {
         ttftMs = Date.now() - started;
@@ -245,15 +252,38 @@ export async function forwardUpstream(
         onFirstContent?.(contentTtftMs);
       }
     };
+
+    const flushHeadersOnce = () => {
+      if (headersFlushed) return;
+      headersFlushed = true;
+      if (typeof clientRes.flushHeaders === 'function') clientRes.flushHeaders();
+    };
+
     if (isStream) {
       const cap = createSseCapture();
       if (upstreamRes.body) {
-        for await (const chunk of upstreamRes.body) {
-          touchIdle();
-          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-          markFirst();
-          cap.feed(buf, markContent, markReasoning);
-          clientRes.write(buf);
+        if (!injector) {
+          for await (const chunk of upstreamRes.body) {
+            touchIdle();
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            markFirst();
+            cap.feed(buf, markContent, markReasoning);
+            clientRes.write(buf);
+          }
+        } else {
+          const sse = createSseInjector({ injector, injectorMode, clientRes, flushHeadersOnce });
+          for await (const chunk of upstreamRes.body) {
+            touchIdle();
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            markFirst();
+            cap.feed(buf, markContent, markReasoning);
+            await sse.feed(buf);
+          }
+          await sse.finish();
+          injected = !!injector.inserted;
+          if (injector.failed && injectorMode === 'head' && !sse.wroteAny()) {
+            throw new Error('配角台词插入失败：未能定位 content 字段');
+          }
         }
       }
       assistantText = cap.text();
@@ -263,9 +293,28 @@ export async function forwardUpstream(
     } else {
       const raw = await upstreamRes.text();
       markFirst();
-      clientRes.write(raw);
+      let out = raw;
+      if (injector) {
+        let parsed = null;
+        try {
+          parsed = JSON.parse(raw);
+        } catch {}
+        const msg = parsed?.choices?.[0]?.message;
+        if (msg && typeof msg.content === 'string') {
+          const first = await injector.feed(msg.content);
+          const rest = await injector.finish();
+          msg.content = first + rest;
+          out = JSON.stringify(parsed);
+          injected = !!injector.inserted;
+          if (injector.failed && injectorMode === 'head') {
+            throw new Error('配角台词插入失败：未能定位 content 字段');
+          }
+        }
+      }
+      flushHeadersOnce();
+      clientRes.write(out);
       try {
-        const j = JSON.parse(raw);
+        const j = JSON.parse(out);
         assistantText = j.choices?.[0]?.message?.content || '';
         reasoningText =
           j.choices?.[0]?.message?.reasoning_content || j.choices?.[0]?.message?.reasoning || '';
@@ -290,6 +339,7 @@ export async function forwardUpstream(
       reasoningTtftMs,
       contentTtftMs,
       durationMs: Date.now() - started,
+      injected,
     };
   } catch (err) {
     if (idleTimer) clearTimeout(idleTimer);
@@ -298,6 +348,129 @@ export async function forwardUpstream(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * SSE 注入器：解析事件 → 取 delta.content → 过 ContentInjector → 重新合成事件写回。
+ * 只在共演模式下使用；普通请求仍走原始字节直通。
+ */
+function createSseInjector({ injector, injectorMode, clientRes, flushHeadersOnce }) {
+  let pending = Buffer.alloc(0);
+  let envelope = null;
+  let wrote = false;
+  // head 模式：定位到 content 之前不向客户端写任何字节，失败时才能干净地回错误
+  const held = [];
+
+  const writeRaw = (text) => {
+    flushHeadersOnce();
+    clientRes.write(text);
+    wrote = true;
+  };
+
+  const writeEvent = (obj, outText) => {
+    const next = JSON.parse(JSON.stringify(obj));
+    const choice = Array.isArray(next.choices) ? next.choices[0] : null;
+    if (choice) {
+      choice.delta = { content: outText };
+      choice.finish_reason = null;
+      if (choice.index == null) choice.index = 0;
+    }
+    writeRaw(`data: ${JSON.stringify(next)}\n\n`);
+  };
+
+  const flushText = (text) => {
+    if (!text) return;
+    if (!envelope) {
+      // 还没有可复制的信封：构造一个最小 OpenAI chunk
+      writeEvent({ object: 'chat.completion.chunk', choices: [{ index: 0, delta: {}, finish_reason: null }] }, text);
+      return;
+    }
+    writeEvent(envelope, text);
+  };
+
+  const flushHeld = () => {
+    if (!held.length) return;
+    for (const item of held) writeRaw(item);
+    held.length = 0;
+  };
+
+  const holdOrWrite = (raw) => {
+    if (injectorMode === 'head' && !injector.inserted && !injector.failed) held.push(raw);
+    else writeRaw(raw);
+  };
+
+  const handleEvent = async (eventBuf) => {
+    const text = eventBuf.toString('utf8');
+    const lines = text.split(/\r?\n/);
+    const dataLines = lines.filter((l) => l.trim().startsWith('data:'));
+    if (!dataLines.length) {
+      holdOrWrite(text + '\n\n');
+      return;
+    }
+    let payload = '';
+    for (const l of dataLines) payload += l.trim().slice(5).trim();
+    if (!payload || payload === '[DONE]') {
+      holdOrWrite(text + '\n\n');
+      return;
+    }
+    let obj;
+    try {
+      obj = JSON.parse(payload);
+    } catch {
+      holdOrWrite(text + '\n\n');
+      return;
+    }
+    const delta = obj?.choices?.[0]?.delta;
+    if (!delta || typeof delta.content !== 'string') {
+      // 没有正文（例如只有 reasoning 或 usage）：原样转发；head 模式下先按住
+      if (injectorMode === 'head' && !injector.inserted && !injector.failed) held.push(`data: ${JSON.stringify(obj)}\n\n`);
+      else writeRaw(`data: ${JSON.stringify(obj)}\n\n`);
+      return;
+    }
+    envelope = obj;
+    const emitted = await injector.feed(delta.content);
+    if (injector.failed && injectorMode === 'head' && !wrote) {
+      // 交给上层抛错，此时尚未写出任何字节
+      return;
+    }
+    if (injector.inserted) flushHeld();
+    flushText(emitted);
+  };
+
+  return {
+    async feed(buf) {
+      pending = pending.length ? Buffer.concat([pending, buf]) : buf;
+      for (;;) {
+        const idxLF = pending.indexOf('\n\n');
+        const idxCRLF = pending.indexOf('\r\n\r\n');
+        let idx = idxLF;
+        let sep = 2;
+        if (idxCRLF >= 0 && (idx < 0 || idxCRLF < idx)) {
+          idx = idxCRLF;
+          sep = 4;
+        }
+        if (idx < 0) break;
+        const eventBuf = pending.subarray(0, idx);
+        pending = pending.subarray(idx + sep);
+        await handleEvent(eventBuf);
+      }
+    },
+    async finish() {
+      if (pending.length) {
+        await handleEvent(pending);
+        pending = Buffer.alloc(0);
+      }
+      const rest = await injector.finish();
+      // head 模式没定位到 content：不能把半截字节写出去，交给上层整轮作废
+      if (injectorMode === 'head' && injector.failed) {
+        held.length = 0;
+        return;
+      }
+      flushHeld();
+      if (rest) flushText(rest);
+    },
+    wroteAny: () => wrote,
+  };
 }
 
 export function sendJsonError(res, status, code, message) {
