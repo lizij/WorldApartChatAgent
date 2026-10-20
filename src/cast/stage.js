@@ -18,6 +18,9 @@ const ADDRESS_VERB_BEFORE = /(?:对|朝|冲|向|问|看向|望着|看着|叫|喊
 const COMMAND_RE = /\/(invite|remove)[ \t]+([^\s，,。！？!?、（）()\[\]【】「」『』“”"'《》<>]+)/gi;
 const ADDRESS_SUFFIX = /^(?:[，,、]|[你妳]|在吗|在不在|呢|啊|呀|[？?]|[，,]\s*[你妳]|，\s*)/;
 const MENTION_SUFFIX = /^(?:的|家|最近|那|这边|那边|铺子|的事|怎么样的时候)/;
+// 只有“X 的卧房/铺子/家”这类所属地点才不算点到人；
+// “X 的手/肩”是对她本人的动作，算被提及。
+const MENTION_OWNERSHIP = /^(?:的(?:卧房|房间|屋子|宅子|院子|铺子|铺|店|家|住处|东西)|家|那边|这边)/;
 
 const PUNCT_BEFORE = /[\s，。！？、,.!?：:；;「」『』“”"'（）()\[\]【】]/;
 
@@ -170,7 +173,7 @@ export function parseDirectives({ text, names } = {}) {
     while (at >= 0) {
       const end = at + n.length;
       // “X的卧房”“X家”这类所属/方位描述只是提及，不算在叫这个人
-      if (!overlaps(at, end) && !MENTION_SUFFIX.test(cleanText.slice(end))) {
+      if (!overlaps(at, end) && !MENTION_OWNERSHIP.test(cleanText.slice(end))) {
         mentions.push({ name: n, pos: at });
         break;
       }
