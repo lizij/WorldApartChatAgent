@@ -991,6 +991,7 @@ export function createServer({ config, logger }) {
     let castMode = null; // 'head' | 'tail'
     let castStage = null;
     let castStageChanged = false;
+    let castStageTouched = false;
     let castNotes = [];
     let castCommands = [];
     let modelPlayerText = info.userText;
@@ -1019,12 +1020,14 @@ export function createServer({ config, logger }) {
           // 入场/离场仍要在本轮成功后落盘
           castStage = cast.stage || null;
           castStageChanged = !!cast.changed;
+          castStageTouched = !!cast.touched;
           cast = null;
         }
         if (cast?.coStar) bCard = cast.coStar.card;
         if (cast) {
           castStage = cast.stage;
           castStageChanged = !!cast.changed;
+          castStageTouched = !!cast.touched;
         }
       } catch (err) {
         warnings.push('cast_plan_failed:' + (err?.message || String(err)));
@@ -1487,7 +1490,18 @@ export function createServer({ config, logger }) {
     const bLine = castInjector?.bLine || bActor?.line || null;
     // result.assistantText 来自注入后的内容，已包含 B 的台词；重建分段时必须用注入前的 A 正文，
     // 否则 B 的台词会被重复写入展示文本、账本与摘要。
-    const aText = (castInjector?.inserted ? castInjector.aContentText() : '') || parsedA.content;
+    let aText = castInjector?.inserted ? castInjector.aContentText() : '';
+    if (!aText) {
+      // 流式兜底等场景拿不到原文：从展示文本里把已知的 B 台词剥掉
+      aText = parsedA.content;
+      if (castInjector?.inserted && bLine) {
+        if (castMode === 'head' && aText.startsWith(bLine)) {
+          aText = aText.slice(bLine.length).replace(/^\r?\n/, '');
+        } else if (castMode === 'tail' && aText.endsWith(bLine)) {
+          aText = aText.slice(0, -bLine.length).replace(/\r?\n$/, '');
+        }
+      }
+    }
     let finalContent = parsedA.content;
     let segments = null;
     if (cast && bCard && bLine) {
@@ -1506,7 +1520,10 @@ export function createServer({ config, logger }) {
     }
 
     if (cast && castInjector?.failed) warnings.push('costar_slot_missed');
-    if (cast && cast.shouldBSpeak && !bLine) warnings.push('costar_silent');
+    // 模型没按 JSON 输出、台词只能拼在纯文本里：游戏端这轮本来就解析不了，记一笔便于排查
+    if (cast && castInjector?.inserted && !parsedA.jsonOk) warnings.push('costar_fallback');
+    // 槽位缺失时 B 根本没被请求，不能再记“选择沉默”
+    if (cast && cast.shouldBSpeak && !bLine && !castInjector?.failed) warnings.push('costar_silent');
 
     const tokens = tokenUsage({
       usage: result.usage,
@@ -1578,7 +1595,7 @@ export function createServer({ config, logger }) {
     );
 
     // —— 落盘：整轮成功后才提交在场状态与对话 ——
-    if (castStage && castStageChanged && result.ok) {
+    if (castStage && (castStageChanged || castStageTouched) && result.ok) {
       try {
         saveStage(info.slug, castStage);
       } catch (err) {

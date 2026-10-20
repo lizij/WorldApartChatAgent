@@ -109,6 +109,9 @@
           </label>
           <label>A 先说完后等配角（毫秒）<input type="number" id="castTailWait" min="500" step="500" /></label>
         </div>
+        <div class="grid three advanced">
+          <label>超时清场（分钟，其间无来往即请出配角）<input type="number" id="castAutoExitMin" min="1" max="1440" step="1" /></label>
+        </div>
         <label class="check"><input type="checkbox" id="castAllowSilence" /> 玩家点名配角时，允许主角只给在旁反应（不接话）</label>
         <label class="check"><input type="checkbox" id="castWritesMemory" /> 配角写入自己的长期记忆（默认关闭）</label>
         <label class="check"><input type="checkbox" id="castSkipOnTask" /> 任务 / 话题轮自动退化为单人戏</label>

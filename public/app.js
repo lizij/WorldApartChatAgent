@@ -67,6 +67,7 @@ async function loadConfig() {
   $('#castSpeakPolicy').value = cast.speakPolicy || 'addressed';
   $('#castOutputStyle').value = cast.outputStyle || 'script';
   $('#castTailWait').value = cast.actorTailWaitMs ?? 3000;
+  $('#castAutoExitMin').value = Math.round((cast.autoExitIdleMs ?? 7200000) / 60000);
   $('#castAllowSilence').checked = cast.allowASilence !== false;
   $('#castWritesMemory').checked = !!cast.coStarWritesMemory;
   $('#castSkipOnTask').checked = cast.skipOnTask !== false;
@@ -164,6 +165,7 @@ $('#saveCast').addEventListener('click', async () => {
         speakPolicy: $('#castSpeakPolicy').value,
         outputStyle: $('#castOutputStyle').value,
         actorTailWaitMs: Number($('#castTailWait').value) || 3000,
+        autoExitIdleMs: Math.round((Number($('#castAutoExitMin').value) || 120) * 60000),
         allowASilence: $('#castAllowSilence').checked,
         coStarWritesMemory: $('#castWritesMemory').checked,
         skipOnTask: $('#castSkipOnTask').checked,

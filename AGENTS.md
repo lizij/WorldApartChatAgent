@@ -166,7 +166,7 @@
 | `multiNpc.maxCoStars/maxCallsPerTurn` | 同场配角上限（默认 1）/ 一轮最多几次 NPC 发言调用（默认 2；1 = 只跑主角） |
 | `multiNpc.speakPolicy/outputStyle/allowASilence` | 配角开口策略 `addressed/always` / 多人输出格式 `script/inherit` / 允许主角只给在旁反应 |
 | `multiNpc.coStarWritesMemory` | 配角是否写入自己的长期记忆（默认 `false`） |
-| `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务/话题轮**退化单人戏（普通闲聊的 `## 任务：闲聊` 不算）/ 超时清场（30 分钟） |
+| `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务/话题轮**退化单人戏（普通闲聊的 `## 任务：闲聊` 不算）/ 超时清场（默认 **120 分钟**，管理页按分钟填写） |
 | `multiNpc.actorTailWaitMs/actorMaxTokens/actorTimeoutMs` | 主角先说完时等待配角的上限（3s）/ 配角输出上限（300 tokens）/ 配角调用超时（20s） |
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
@@ -503,6 +503,30 @@ data/  或  data_test/
   仅在场时生效（提及仍不会把人拉进场）；`X的/家` 这类所属描述不算提及；
   「纪澜之」里的「澜之」按区间重叠过滤，避免短别名重复命中。只有真点名才让 B 抢先开口，
   单纯提及默认 A 先说。日志详情新增 `cast.mentionedB`。
+
+- **配角槽位缺失时台词丢失（2026-10-21，0.8.5）**：真机 `seq=642` 出现
+  `costar_slot_missed,costar_silent`。该轮 A 的回复其实是**纯文本**（`reply_json_ok=false`），
+  没有 `"content"` 插槽，于是 B 的请求根本没发出、台词被丢弃，还多记了一条“选择沉默”。
+  修复：
+  ① 槽位定位改为先用整段 `JSON.parse` 核对、再在原文里扫字符串值，允许前缀说明/代码围栏/字段乱序，
+  并跳过被转义的伪命中（`\"content\"`）；非流式改为整段一次注入（`injectWholeText`）。
+  ② 模型没按 JSON 输出时兜底：仍请求 B，并把台词直接拼在正文前（head）/后（tail），
+  流式在 `finish()` 里补一个文本 chunk，不再丢台词、也不再让 head 模式整轮作废；日志记 `costar_fallback`。
+  ③ `costar_silent` 只在 B 真的没词时记，槽位缺失时不再重复告警。
+  验证：非流式 head/tail 的 JSON 与纯文本四种组合、带转义同名片段与代码围栏的定位、逐字符分片流式回归，
+  以及假上游 SSE 纯文本（head/tail）端到端：客户端文本均为「A、B 各一次且顺序正确」。
+
+- **在场配角 30 分钟后被误清场（2026-10-21，0.8.6）**：真机 `seq=649~652` 突然不再共演，
+  `stage.json` 被清空为 `onStage: []`。原因是 `stage.updatedAt` 只在**在场状态变化**时更新，
+  而超时清场按 `autoExitIdleMs`（默认 30 分钟）判断——纪澜之 17:56 入场后，中间几轮虽在同一场景、
+  每轮都有共演块，但时间戳没动，18:26 的第 649 轮（差 30 分 51 秒）被判为“空闲超时”直接清场。
+  修复：只要本轮结束时仍有配角在场就刷新 `updatedAt` 并落盘（`nextStage` 新增 `touched`，
+  服务端在 `changed || touched` 时保存）；清场原因记 `cast_stage_cleared:scene|idle`。
+  回归：2/29 分钟不刷新不误清、31 分钟清场并告警、清场后点名可重新入场。
+
+- **超时清场默认值与管理页配置（2026-10-21，0.9.0）**：`autoExitIdleMs` 默认由 30 分钟改为 **120 分钟**，
+  管理页「多 NPC 共演」新增“超时清场（分钟）”输入（1~1440 分钟，保存时换算成毫秒）；
+  仍是“在场期间每轮成功回复即刷新”的语义。
 
 ### 排障
 

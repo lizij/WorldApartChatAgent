@@ -301,9 +301,8 @@ export async function forwardUpstream(
         } catch {}
         const msg = parsed?.choices?.[0]?.message;
         if (msg && typeof msg.content === 'string') {
-          const first = await injector.feed(msg.content);
-          const rest = await injector.finish();
-          msg.content = first + rest;
+          // 非流式：整段文本一次注入（含 JSON 槽位定位与纯文本兜底）
+          msg.content = await injector.injectWholeText(msg.content);
           out = JSON.stringify(parsed);
           injected = !!injector.inserted;
           if (injector.failed && injectorMode === 'head') {
@@ -461,6 +460,28 @@ function createSseInjector({ injector, injectorMode, clientRes, flushHeadersOnce
         pending = Buffer.alloc(0);
       }
       const rest = await injector.finish();
+      // 流里始终没出现可定位的 content 槽（模型回了纯文本）：兜底把 B 的台词补进正文，
+      // 而不是丢掉这一轮或整轮作废。
+      if (injector.failed && !injector.inserted) {
+        const aText = injector.aContentText();
+        const line = await injector.resolveLine(aText);
+        if (line) {
+          injector.bLine = line;
+          injector.inserted = true;
+          injector.failed = false;
+          injector.plainContent = aText || null;
+          if (injectorMode === 'head') {
+            flushText(line + '\n');
+            flushHeld();
+            if (rest) flushText(rest);
+          } else {
+            flushHeld();
+            if (rest) flushText(rest);
+            flushText('\n' + line);
+          }
+          return;
+        }
+      }
       // head 模式没定位到 content：不能把半截字节写出去，交给上层整轮作废
       if (injectorMode === 'head' && injector.failed) {
         held.length = 0;

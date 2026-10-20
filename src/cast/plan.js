@@ -80,12 +80,14 @@ export function planCast({ info, cfg, aMemoryText = '' } = {}) {
     sceneKey: info.state?.scene || null,
     now: Date.now(),
     maxCoStars: Math.max(1, Number(ms.maxCoStars) || 1),
-    idleMs: Math.max(1000, Number(ms.autoExitIdleMs) || 1800000),
+    idleMs: Math.max(1000, Number(ms.autoExitIdleMs) || 7200000),
     resolveSlug: resolveCoStar,
   });
 
   const warnings = [];
   if (next.entered.length > 1) warnings.push('cast_overflow');
+  // 换场/超时把配角清掉时记一笔，便于排查“怎么突然不共演了”
+  if (next.cleared) warnings.push('cast_stage_cleared:' + next.cleared);
   // 指令失败原因（未启用 / 无 intake / 不存在）
   for (const c of directives.commands || []) {
     const slug = registry.map.get(c.name);
@@ -107,6 +109,8 @@ export function planCast({ info, cfg, aMemoryText = '' } = {}) {
   const base = {
     stage: next.stage,
     changed: next.changed || disabledLeft.length > 0,
+    // touched：即使在场状态没变，也要把“本轮仍在同一场景”的时间戳落盘
+    touched: next.touched || disabledLeft.length > 0,
     entered: next.entered,
     left: [...next.left, ...disabledLeft],
     addressedA: addrA.length > 0,

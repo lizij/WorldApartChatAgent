@@ -193,20 +193,28 @@ export function parseDirectives({ text, names } = {}) {
 /**
  * 计算新的在场状态（纯函数）。
  * @param {{prev:object, directives:object, sceneKey:string|null, now:number, maxCoStars:number, idleMs:number, resolveSlug:Function}} args
- * @returns {{stage:object, changed:boolean, entered:string[], left:string[]}}
+ * @returns {{stage:object, changed:boolean, touched:boolean, cleared:string|null, entered:string[], left:string[]}}
  */
 export function nextStage({ prev, directives, sceneKey, now, maxCoStars, idleMs, resolveSlug }) {
   const before = JSON.stringify(prev?.onStage || []);
   const beforeScene = prev?.sceneKey || null;
+  const beforeUpdatedAt = Number(prev?.updatedAt) || 0;
   const stage = {
     sceneKey: prev?.sceneKey || null,
     onStage: Array.isArray(prev?.onStage) ? prev.onStage.map((x) => ({ ...x })) : [],
-    updatedAt: Number(prev?.updatedAt) || 0,
+    updatedAt: beforeUpdatedAt,
   };
 
-  // 换场 / 长时间空闲：清空
-  if (stage.sceneKey && sceneKey && stage.sceneKey !== sceneKey) stage.onStage = [];
-  if (stage.updatedAt && now - stage.updatedAt > idleMs) stage.onStage = [];
+  // 换场 / 长时间空闲：清空（记下原因，便于日志排查）
+  let cleared = null;
+  if (stage.sceneKey && sceneKey && stage.sceneKey !== sceneKey) {
+    if (stage.onStage.length) cleared = 'scene';
+    stage.onStage = [];
+  }
+  if (stage.updatedAt && now - stage.updatedAt > idleMs) {
+    if (stage.onStage.length) cleared = 'idle';
+    stage.onStage = [];
+  }
   if (sceneKey) stage.sceneKey = sceneKey;
 
   const entered = [];
@@ -240,7 +248,11 @@ export function nextStage({ prev, directives, sceneKey, now, maxCoStars, idleMs,
 
   const after = JSON.stringify(stage.onStage);
   const changed = before !== after || beforeScene !== stage.sceneKey;
-  if (changed || directives.addresses?.length) stage.updatedAt = now;
+  // 只要本轮还有配角在场，就刷新时间戳：超时清场衡量的是“多久没来往”，
+  // 而不是“多久没换人”，否则聊得久一点就会被误判为离场。
+  if (stage.onStage.length) stage.updatedAt = now;
+  else if (changed || directives.addresses?.length) stage.updatedAt = now;
+  const touched = stage.updatedAt !== beforeUpdatedAt;
 
-  return { stage, changed, entered, left };
+  return { stage, changed, touched, cleared, entered, left };
 }

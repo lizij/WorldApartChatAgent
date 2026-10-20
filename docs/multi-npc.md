@@ -1,7 +1,7 @@
 # 多 NPC 共演 · 方案评估
 
-> 状态：**已实现（0.8.4），待真机验收**。
-> 目标版本：`0.8.4`（缺陷修复，PATCH）；实际交付时按
+> 状态：**已实现（0.9.0），待真机验收**。
+> 目标版本：`0.9.0`（新增管理页配置项，MINOR）；实际交付时按
 > [contributing.md](contributing.md) §1 递增 `package.json` 的 `version`。
 > 定位：**【实验性】**，默认关闭，开启后产生**额外 token 消耗**。
 
@@ -273,7 +273,7 @@
     "coStarWritesMemory": false,
     "transcriptTurns": 8,
     "skipOnTask": true,
-    "autoExitIdleMs": 1800000
+    "autoExitIdleMs": 7200000
   }
 }
 ```
@@ -289,7 +289,7 @@
 | `coStarWritesMemory` | 需求 3.6，默认关 |
 | `transcriptTurns` | 传给配角的共享对话条数 |
 | `skipOnTask` | 只在**真任务/话题轮**退化单人戏：存在 `## 本次话题` / `## 收尾判定`，或 `## 任务：X` 的标题不是“闲聊” |
-| `autoExitIdleMs` | 超时自动清场，避免角色跨场景跟随 |
+| `autoExitIdleMs` | 超时自动清场（默认 **120 分钟**，管理页以“分钟”填写）：在场期间每轮成功回复都会刷新时间戳 |
 
 管理页保存时沿用 [src/server.js](../src/server.js) 的 `intIn` / 布尔归一化，非法值忽略、数值夹取。
 
@@ -374,7 +374,9 @@
 清场条件：
 
 - `sceneKey`（**地点**）发生变化（`sceneKey` 为空时不清场，避免游戏未下发地点时误清）；
-- 距 `updatedAt` 超过 `autoExitIdleMs`；
+- 距 `updatedAt` 超过 `autoExitIdleMs`。**只要本轮结束时有配角在场，`updatedAt` 就会刷新并落盘**——
+  它衡量的是“多久没和主角来往”，不是“多久没换人”，否则聊得久一点就会被误判为离场；
+  清场原因会记 `cast_stage_cleared:scene|idle`；
 - 玩家显式写出离场指令；
 - 管理页手工“清空在场”。
 
@@ -482,7 +484,10 @@ emotion、control 与 intent 只描述你自己（江楚弦）。
 - **B 先说话**：B 先跑完 → 把 B 的公开输出写入 A 的观测块 → A 流式时，用流式 JSON 扫描器定位第一个顶层 `"content":"`，在其后插入 B 的**转义台词**；
 - **A 先说话**：A 正常流式 → B 跑完后，在 `content` 字符串闭合引号前插入 B 的转义台词（尾部插槽；若 B 未就绪，最多延迟 1 个 delta / 1.5s）；
 - 插入前做 JSON 字符串转义（`"`、`\`、换行）；插入后整段仍是合法 JSON，且 `content` 之外的字段（`emotion/control/intent`）逐字不变；
-- **定位失败**：B 先说话 → 整轮作废（A 已观测到 B，不能只给 A）；A 先说话 → 丢弃 B 台词，A 原样返回；均记 `costar_slot_missed`。
+- **槽位定位**：优先按整段 `JSON.parse` 的结果核对，再在原文里定位 `"content"` 字符串值；允许前缀说明、代码围栏、字段乱序，
+  并跳过被转义的伪命中（`\"content\"`）；流式仍用增量扫描器。
+- **模型没按 JSON 输出**（偶发回纯文本）：不丢 B 的台词，直接把台词拼在正文前/后（head 在前、tail 在后）作为兜底，
+  此时游戏端本来也解析不了这轮回复；日志记 `costar_fallback`。仅当 B 自身没有台词时才记 `costar_silent`。
 
 `speakPolicy=addressed` 时，只有以下情况才发配角请求：
 
