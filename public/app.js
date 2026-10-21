@@ -71,6 +71,7 @@ async function loadConfig() {
   $('#castAllowSilence').checked = cast.allowASilence !== false;
   $('#castWritesMemory').checked = !!cast.coStarWritesMemory;
   $('#castSkipOnTask').checked = cast.skipOnTask !== false;
+  $('#castAutoStage').checked = !!cast.autoStage;
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -169,6 +170,7 @@ $('#saveCast').addEventListener('click', async () => {
         allowASilence: $('#castAllowSilence').checked,
         coStarWritesMemory: $('#castWritesMemory').checked,
         skipOnTask: $('#castSkipOnTask').checked,
+        autoStage: $('#castAutoStage').checked,
       },
     }),
   });
@@ -194,15 +196,39 @@ $$('[data-copy]').forEach((btn) =>
 );
 
 // —— Tabs ——
-$$('.tab').forEach((t) =>
-  t.addEventListener('click', () => {
-    $$('.tab').forEach((x) => x.classList.remove('active'));
-    $$('.tab-pane').forEach((x) => x.classList.remove('active'));
-    t.classList.add('active');
-    $('#tab-' + t.dataset.tab).classList.add('active');
-    if (t.dataset.tab === 'npcs') loadNpcs();
-  }),
-);
+const TAB_KEY = 'wfc.tab';
+const TAB_NAMES = new Set($$('.tab').map((t) => t.dataset.tab));
+
+/** 切换 tab；remember=true 时写入 localStorage 与 location.hash。 */
+function activateTab(name, { remember = true } = {}) {
+  const key = TAB_NAMES.has(name) ? name : 'overview';
+  $$('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === key));
+  $$('.tab-pane').forEach((x) => x.classList.remove('active'));
+  const pane = $('#tab-' + key);
+  if (pane) pane.classList.add('active');
+  if (key === 'npcs') loadNpcs();
+  if (!remember) return;
+  try {
+    localStorage.setItem(TAB_KEY, key);
+  } catch {}
+  if (location.hash !== '#' + key) {
+    try {
+      history.replaceState(null, '', '#' + key);
+    } catch {
+      location.hash = key;
+    }
+  }
+}
+
+$$('.tab').forEach((t) => t.addEventListener('click', () => activateTab(t.dataset.tab)));
+window.addEventListener('hashchange', () => activateTab(location.hash.slice(1), { remember: false }));
+
+// 初始 tab：地址栏 hash 优先，其次上次停留的页面
+let lastTab = '';
+try {
+  lastTab = localStorage.getItem(TAB_KEY) || '';
+} catch {}
+activateTab(location.hash.slice(1) || lastTab, { remember: false });
 
 // —— 日志 ——
 function kindOf(rec) {

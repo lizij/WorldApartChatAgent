@@ -67,11 +67,15 @@ export function planCast({ info, cfg, aMemoryText = '' } = {}) {
     onStage: (prev.onStage || []).filter((x) => stillInvitable(x.slug)),
   };
 
-  // 显式 /invite /remove 与括号指令合并；remove 优先
+  // 显式 /invite、/add 与 /leave、/remove 始终生效；
+  // 「根据台词自动进场/离场」是可选项（默认关闭）：关闭时括号里的动作与点名只作为叙事事实，
+  // 不再改变在场状态，避免措辞误判把人请进/请出。
+  const autoStage = ms.autoStage === true;
   const mergedDirectives = {
     ...directives,
-    entries: [...directives.entries, ...(directives.invites || [])],
-    exits: [...directives.exits, ...(directives.removes || [])],
+    entries: [...(autoStage ? directives.entries : []), ...(directives.invites || [])],
+    exits: [...(autoStage ? directives.exits : []), ...(directives.removes || [])],
+    addresses: autoStage ? directives.addresses : [],
   };
 
   const next = nextStage({

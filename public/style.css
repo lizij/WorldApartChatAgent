@@ -38,10 +38,11 @@ h1 { font-size: 16px; font-weight: 600; }
 .conn-state.online .dot { background: var(--green); }
 .conn-state.offline .dot { background: var(--red); }
 
-.tabs { display: flex; gap: 4px; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.tabs { display: flex; gap: 4px; padding: 0 18px; background: var(--panel); border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tab {
   background: none; border: none; color: var(--muted); padding: 10px 16px; cursor: pointer;
-  font-size: 14px; border-bottom: 2px solid transparent;
+  font-size: 14px; border-bottom: 2px solid transparent; white-space: nowrap; flex: 0 0 auto;
 }
 .tab:hover { color: var(--text); }
 .tab.active { color: var(--accent); border-bottom-color: var(--accent); }

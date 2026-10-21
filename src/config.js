@@ -135,6 +135,8 @@ export function defaults() {
       transcriptTurns: 8,
       // 检测到任务/话题模块时本轮退化为单人戏
       skipOnTask: true,
+      // 是否允许根据台词（括号里的动作/点名）自动进场、离场；默认关闭，只认 /invite /add /leave /remove
+      autoStage: false,
       // 超时自动清场（毫秒）：默认 120 分钟，按“多久没和主角来往”计
       autoExitIdleMs: 7200000,
       // A 先说完、B 接话时，尾部插槽最多等待多久（毫秒）

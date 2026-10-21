@@ -13,9 +13,12 @@ import { NPCS_DIR } from '../memory/store.js';
 
 const ENTRY_VERBS = /(走过来|走了过来|走进|走了进来|进来|推门|赶来|赶到|出现|到场|来到|过来|上前|站在|立在|探进|迈步)/;
 const SPEAK_VERBS = /^(?:\s*(?:说|道|问|答|喊|叫|开口|低声|插话|笑道|答道|问道))/;
-const EXIT_VERBS = /(离开|走了|告辞|退下|出去|离去|先回|退开|转身走)/;
+// 离场动词必须紧跟在名字之后（允许“她/他/你”与“就/便/先”等虚词），
+// 避免“抓住清月的腰让她无法离开”这类从句被当成离场。
+const EXIT_AFTER =
+  /^[ \t]*[，,、]?[ \t]*(?:[他她你妳][ \t]*)?(?:就|便|要|想|先|也|已|已经)?[ \t]*(离开|走了|告辞|退下|出去|离去|先回|退开|转身走)/;
 const ADDRESS_VERB_BEFORE = /(?:对|朝|冲|向|问|看向|望着|看着|叫|喊|招呼)$/;
-const COMMAND_RE = /\/(invite|remove)[ \t]+([^\s，,。！？!?、（）()\[\]【】「」『』“”"'《》<>]+)/gi;
+const COMMAND_RE = /\/(invite|add|leave|remove)[ \t]+([^\s，,。！？!?、（）()\[\]【】「」『』“”"'《》<>]+)/gi;
 const ADDRESS_SUFFIX = /^(?:[，,、]|[你妳]|在吗|在不在|呢|啊|呀|[？?]|[，,]\s*[你妳]|，\s*)/;
 const MENTION_SUFFIX = /^(?:的|家|最近|那|这边|那边|铺子|的事|怎么样的时候)/;
 // 只有“X 的卧房/铺子/家”这类所属地点才不算点到人；
@@ -85,7 +88,7 @@ function parseParens(text, names) {
           // 不能拿名字前面的动词判断，否则“我走进来，看见章籽梦”会误判为配角入场。
           if (ENTRY_VERBS.test(after.slice(0, 12)) || SPEAK_VERBS.test(after)) {
             entries.push({ slug: null, name, pos: abs, raw: name });
-          } else if (EXIT_VERBS.test(after.slice(0, 12))) {
+          } else if (EXIT_AFTER.test(after)) {
             exits.push({ name, pos: abs });
           }
           const before = body.slice(0, at);
@@ -133,11 +136,16 @@ export function parseDirectives({ text, names } = {}) {
     return { entries: [], exits: [], addresses: [], mentions: [], invites: [], removes: [], commands: [], cleanText: raw };
   }
 
-  // 显式系统指令：/invite XXX、/remove XXX（从玩家输入里剥离）
+  // 显式系统指令：/invite、/add 入场；/leave、/remove 离场（从玩家输入里剥离）
   const commands = [];
   let cleanText = raw;
   for (const m of raw.matchAll(COMMAND_RE)) {
-    commands.push({ action: m[1].toLowerCase(), name: m[2].trim(), pos: m.index });
+    const word = m[1].toLowerCase();
+    commands.push({
+      action: word === 'add' ? 'invite' : word === 'leave' ? 'remove' : word,
+      name: m[2].trim(),
+      pos: m.index,
+    });
   }
   if (commands.length) {
     cleanText = raw

@@ -19,14 +19,16 @@
 </header>
 
 <nav class="tabs">
-  <button class="tab active" data-tab="dashboard">概览与配置</button>
+  <button class="tab active" data-tab="overview">概览</button>
+  <button class="tab" data-tab="memory">记忆与提示词</button>
+  <button class="tab" data-tab="labs">实验功能</button>
   <button class="tab" data-tab="logs">执行日志</button>
   <button class="tab" data-tab="npcs">NPC 记忆</button>
 </nav>
 
 <main>
-  <!-- 概览 -->
-  <section id="tab-dashboard" class="tab-pane active">
+  <!-- 概览：连接信息 + 上游 -->
+  <section id="tab-overview" class="tab-pane active">
     <div class="grid two">
       <div class="card">
         <h2>游戏连接信息</h2>
@@ -59,7 +61,10 @@
         </div>
       </div>
     </div>
+  </section>
 
+  <!-- 记忆与提示词 -->
+  <section id="tab-memory" class="tab-pane">
     <div class="card">
       <h2>记忆设置</h2>
       <div class="grid three">
@@ -83,7 +88,10 @@
         <div class="row right"><button class="btn primary" id="savePrompts">保存提示词设置</button><span class="saved-hint" id="promptsSaved"></span></div>
       </div>
     </div>
+  </section>
 
+  <!-- 实验功能：多 NPC 共演 + 请求重写 -->
+  <section id="tab-labs" class="tab-pane">
     <div class="card">
       <h2>多 NPC 共演 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
       <div class="kv">
@@ -115,6 +123,11 @@
         <label class="check"><input type="checkbox" id="castAllowSilence" /> 玩家点名配角时，允许主角只给在旁反应（不接话）</label>
         <label class="check"><input type="checkbox" id="castWritesMemory" /> 配角写入自己的长期记忆（默认关闭）</label>
         <label class="check"><input type="checkbox" id="castSkipOnTask" /> 任务 / 话题轮自动退化为单人戏</label>
+        <label class="check"><input type="checkbox" id="castAutoStage" /> NPC 自动进场和离场（默认关闭）</label>
+        <p class="hint">关闭时：配角进出场只认显式指令——<code>/invite 名字</code>、<code>/add 名字</code> 请人入场，
+          <code>/leave 名字</code>、<code>/remove 名字</code> 请人离场；台词与括号里的动作只当叙事事实，
+          不会改变在场状态（无来往超过“超时清场”时长会自动离场）。<br />开启时：额外允许按台词自动调度
+          （如「（章籽梦走进来）」入场、「（章籽梦离开了）」离场、直呼其名可自动入场），更省事，但措辞可能被误判。</p>
         <div class="row right"><button class="btn primary" id="saveCast">保存共演设置</button><span class="saved-hint" id="castSaved"></span></div>
       </div>
     </div>

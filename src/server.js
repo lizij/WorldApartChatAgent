@@ -520,7 +520,7 @@ export function createServer({ config, logger }) {
       if (calls !== undefined) safe.multiNpc.maxCallsPerTurn = calls;
       if (m.speakPolicy === 'addressed' || m.speakPolicy === 'always') safe.multiNpc.speakPolicy = m.speakPolicy;
       if (m.outputStyle === 'script' || m.outputStyle === 'inherit') safe.multiNpc.outputStyle = m.outputStyle;
-      for (const k of ['allowASilence', 'coStarWritesMemory', 'skipOnTask']) {
+      for (const k of ['allowASilence', 'coStarWritesMemory', 'skipOnTask', 'autoStage']) {
         if (m[k] !== undefined) safe.multiNpc[k] = !!m[k];
       }
       const tt = intIn(m.transcriptTurns, 1, 40);
