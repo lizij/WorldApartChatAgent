@@ -206,7 +206,9 @@ export class Summarizer {
       // 超限重试：实测 prompt 里的「字数上限」几乎不被遵守（超 277~353 字），
       // 而模型本身有能力写短——把上一次输出回喂、明确要求砍到上限内，
       // 比事后机械截断更靠谱（截断会稳定切掉同一位置之后的内容）。
+      // 目标取上限的 90%，给模型的自然超出留一点余量。
       const limit = Number(cfg.maxMemoryChars) || 0;
+      const retryTarget = limit > 0 ? Math.max(1, Math.floor(limit * 0.9)) : 0;
       const maxRetries = Math.max(0, Math.min(3, Number(cfg.overLimitRetries) || 0));
       let text = first.text;
       let retries = 0;
@@ -214,7 +216,7 @@ export class Summarizer {
         retries += 1;
         const shrunk = await this.#call([
           { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: compressPrompt(slug, text, limit, retries) },
+          { role: 'user', content: compressPrompt(slug, text, retryTarget, retries) },
         ]);
         usageList.push(shrunk.usage);
         if (shrunk.text.length >= text.length) break; // 没压下去就别再试，交给截断兜底
@@ -223,6 +225,7 @@ export class Summarizer {
 
       // 兜底：重试用尽后仍超限，按行边界截断（尽量不切断一句话）
       let final = text;
+      const preTruncateChars = text.length;
       let truncated = false;
       if (limit > 0 && final.length > limit) {
         const cut = final.slice(0, limit);
@@ -277,6 +280,7 @@ export class Summarizer {
           truncated,
           calls: usageList.length,
           generatedChars: first.text.length,
+          preTruncateChars,
         },
       };
       this.logger.append(
@@ -289,9 +293,10 @@ export class Summarizer {
           durationMs: Date.now() - started,
           memoryChars: final.length,
           generatedChars: first.text.length,
+          preTruncateChars,
           retries,
           truncated,
-          warnings: truncated ? [`memory_over_limit:${first.text.length}>${limit}`] : [],
+          warnings: truncated ? [`memory_over_limit:${preTruncateChars}>${limit}`] : [],
           tokens,
         },
         detail,

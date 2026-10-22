@@ -200,6 +200,109 @@ function stripFences(text) {
   return t;
 }
 
+/** 枚举串（含 `|`）的保守默认值：优先回落到“无动作/中性”的取值。 */
+function enumDefault(value) {
+  const parts = String(value)
+    .split('|')
+    .map((x) => x.trim())
+    .filter(Boolean);
+  for (const preferred of ['none', 'normal', 'false', '0']) {
+    if (parts.includes(preferred)) return preferred;
+  }
+  return parts[0] ?? '';
+}
+
+/** 按游戏当轮输出格式模板补全默认值（不硬编码任何字段名或枚举）。 */
+function fillTemplate(node) {
+  if (Array.isArray(node)) return node.map((x) => fillTemplate(x));
+  if (node && typeof node === 'object') {
+    const out = {};
+    for (const k of Object.keys(node)) out[k] = fillTemplate(node[k]);
+    return out;
+  }
+  if (typeof node === 'string') return node.includes('|') ? enumDefault(node) : node;
+  return node;
+}
+
+/**
+ * 模型偶尔会把整个输出格式 JSON 当成“字符串”再转义一遍（`{\"content\":\"…\"}`），
+ * 这种文本不是合法 JSON，直接当纯文本包回去会把反斜杠原样显示给玩家。
+ * 这里先按“它本来是一个 JSON 字符串”解一层，再解析成对象。
+ */
+function reviveEscapedJson(text) {
+  let s = String(text ?? '');
+  // 少数情况外面还套了一层 JSON 字符串引号：先去掉。
+  if (s.startsWith('"') && s.endsWith('"')) {
+    try {
+      const inner = JSON.parse(s);
+      if (typeof inner === 'string') s = inner;
+    } catch {}
+  }
+  // 去壳后可能已经是合法的游戏 JSON 文本。
+  try {
+    const j = JSON.parse(s);
+    if (j && typeof j === 'object' && !Array.isArray(j) && typeof j.content === 'string') return j;
+  } catch {}
+  if (!s.includes('\\"')) return null;
+  try {
+    const unescaped = JSON.parse(`"${s.replace(/\r?\n/g, '\\n')}"`);
+    const j = JSON.parse(unescaped);
+    if (j && typeof j === 'object' && !Array.isArray(j) && typeof j.content === 'string') return j;
+  } catch {}
+  return null;
+}
+
+/**
+ * 模型没按 `## 输出格式` 输出 JSON 时，按当轮模板把正文包成合法 JSON。
+ * 只用于非流式响应（流式已经边收边发，无法回头改写）；拿不到模板时返回 null。
+ * 其余字段一律取模板默认值：枚举串回落到 none/normal，布尔/数字保持模板值。
+ */
+export function wrapPlainReply(text, system) {
+  const contract = formatContract(system || '');
+  if (!contract || !contract.schema) return null;
+  let template;
+  try {
+    template = JSON.parse(contract.schema);
+  } catch {
+    return null;
+  }
+  if (!template || typeof template !== 'object' || typeof template.content !== 'string') return null;
+
+  // 纯文本里如果只是把 JSON 包在代码围栏里，直接去掉围栏即可，不要二次包装。
+  const body = String(text ?? '').trim();
+  const unfenced = stripFences(body);
+  if (unfenced !== body) {
+    try {
+      const j = JSON.parse(unfenced);
+      if (j && typeof j === 'object') return unfenced;
+    } catch {}
+  }
+
+  const out = fillTemplate(template);
+  // 输出被整体转义过（`{\"content\":…}`）：解析回对象，保留模型给出的字段值。
+  const revived = reviveEscapedJson(unfenced);
+  if (revived) {
+    Object.assign(out, revived);
+    if (typeof revived.content !== 'string') out.content = body;
+    // 台词里出现 {GIFT} 占位符说明模型想赠礼；补默认值时不能把它当成“不赠礼”。
+    applyGiftHint(out, out.content);
+    return JSON.stringify(out);
+  }
+  out.content = body;
+  applyGiftHint(out, out.content);
+  return JSON.stringify(out);
+}
+
+/** 模板里 <intent> 下与赠礼有关的布尔字段（按字段名识别，不硬编码游戏枚举）。 */
+function applyGiftHint(out, content) {
+  if (!/\{GIFT\}/.test(String(content ?? ''))) return;
+  const intent = out && typeof out.intent === 'object' ? out.intent : null;
+  if (!intent) return;
+  for (const key of Object.keys(intent)) {
+    if (/gift/i.test(key) && typeof intent[key] === 'boolean') intent[key] = true;
+  }
+}
+
 function dedupe(list) {
   return [...new Set(list)];
 }
@@ -245,7 +348,13 @@ function moduleTitle(content) {
 
 /** 校验单个模块；能修复的格式问题先修复，不能修复才返回错误。 */
 function validateModule(original, rewritten) {
-  if (!rewritten.trim()) return { error: 'rewrite_empty' };
+  if (!rewritten.trim()) {
+    // 整节都在冲突时，重写模型会把它删空；这是合法结果，按“删除该模块”处理。
+    // 例外：`## 输出格式` 是游戏解析回复的技术契约，绝不能整节删除。
+    const a = normalize(original);
+    if (/^##[ \t]*输出格式/m.test(a)) return { error: 'rewrite_empty' };
+    return { error: null, text: '', dropped: true, repaired: false, noop: false };
+  }
   const a = normalize(original);
   const b = normalize(rewritten);
   const fmt = repairFormat(a, b);
@@ -390,6 +499,7 @@ export class RequestRewriter {
         let invalid = null;
         let candidate = original;
         let repaired = false;
+        let dropped = false;
         if (parsed.error) {
           invalid = parsed.error;
         } else if (parsedText == null) {
@@ -401,6 +511,7 @@ export class RequestRewriter {
           else {
             candidate = check.noop ? original : check.text;
             repaired = !!check.repaired;
+            dropped = !!check.dropped;
           }
         }
         const effective = invalid ? original : candidate;
@@ -417,6 +528,7 @@ export class RequestRewriter {
           draft: parsedText ?? null,
           rewritten: effective,
           repaired,
+          droppedModule: dropped && !invalid,
           changed: normalize(original) !== normalize(effective),
           originalChars: original.length,
           rewrittenChars: effective.length,
@@ -447,6 +559,7 @@ export class RequestRewriter {
         changedCount,
         repairedCount,
         failedCount,
+        droppedCount: items.filter((x) => x.droppedModule).length,
         originalChars: items.reduce((n, x) => n + x.originalChars, 0),
         rewrittenChars: items.reduce((n, x) => n + x.rewrittenChars, 0),
         removedCount: items.reduce((n, x) => n + x.removedCount, 0),

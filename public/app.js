@@ -252,6 +252,12 @@ function tokenTag(rec) {
   return `<span class="log-tok" title="token 总数${tk.estimated ? '（估算）' : ''}">${prefix}${fmtTok(tk.total)} tok</span>`;
 }
 
+/** 中性提示（notes）的展示文案：是兜底说明，不是故障。 */
+function noteLabel(n) {
+  if (n === 'reply_wrapped_json') return '已按模板补全 JSON';
+  return String(n || '');
+}
+
 function originLabel(origin) {
   return (
     {
@@ -400,11 +406,13 @@ function renderDetail(d) {
         (m) => `<div class="rw-module">
           <h6>模块 #${m.id ?? m.index}${m.id != null ? `（消息 #${m.index}）` : ''} · ${esc(m.title || '')} · ${
             m.status === 'done'
-              ? m.repaired
-                ? m.changed
-                  ? '已改写（格式已修复）'
-                  : '格式已修复（内容未变）'
-                : '已改写'
+              ? m.dropped
+                ? '已整模块删除（整节均与设定冲突）'
+                : m.repaired
+                  ? m.changed
+                    ? '已改写（格式已修复）'
+                    : '格式已修复（内容未变）'
+                  : '已改写'
               : '未改动（' + esc(m.error || '校验失败') + '）'
           }</h6>
           <p class="detail-note">${m.originalChars ?? '—'} 字 → ${m.rewrittenChars ?? '—'} 字 · 删除 ${m.removedCount ?? 0} 行 / 新增 ${m.addedCount ?? 0} 行</p>
@@ -412,14 +420,15 @@ function renderDetail(d) {
           ${m.added && m.added.length ? `<p class="detail-note">新增/改写后的行：</p><pre class="detail-pre">${esc(m.added.join('\n'))}</pre>` : ''}
           ${m.original != null ? `<details class="rw-details"><summary>原始内容（${String(m.original).length} 字）</summary><pre class="detail-pre">${esc(m.original)}</pre></details>` : ''}
           ${m.draft != null ? `<details class="rw-details"><summary>模型草稿（未采用，${String(m.draft).length} 字）</summary><pre class="detail-pre">${esc(m.draft)}</pre></details>` : ''}
-          ${m.rewritten != null ? `<details class="rw-details"><summary>${m.status === 'done' ? '重写后内容' : '实际采用（已回退原文）'}（${String(m.rewritten).length} 字）</summary><pre class="detail-pre">${esc(m.rewritten)}</pre></details>` : ''}
+          ${m.dropped ? '<p class="detail-note">该模块已从发给上游的请求中移除。</p>' : ''}
+          ${m.rewritten != null && !m.dropped ? `<details class="rw-details"><summary>${m.status === 'done' ? '重写后内容' : '实际采用（已回退原文）'}（${String(m.rewritten).length} 字）</summary><pre class="detail-pre">${esc(m.rewritten)}</pre></details>` : ''}
         </div>`,
       )
       .join('');
     rewriteBlock = `
       <div class="detail-section">
         <h5>请求重写（实验性）· ${rwLabel}</h5>
-        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
         ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
         ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
         <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>
@@ -525,6 +534,9 @@ function renderLog(rec) {
     else if (rec.ttftMs != null) timing.push('首字节 ' + rec.ttftMs + 'ms');
     if (rec.durationMs != null) timing.push('总耗时 ' + rec.durationMs + 'ms');
     if (rec.kind === 'npc') {
+      // 0.11.1 的历史记录把纯文本兜底放进了 warnings；按中性提示渲染，不再标红。
+      const warnList = (rec.warnings || []).filter((w) => w !== 'reply_wrapped_json');
+      const noteList = [...(rec.notes || []), ...(rec.warnings || []).filter((w) => w === 'reply_wrapped_json')];
       body = `
         <div class="log-line"><span class="who">玩家：</span>${esc(rec.playerText || '')}</div>
         ${rec.replyPreview ? `<div class="log-reply">${esc(rec.replyPreview)}</div>` : ''}
@@ -552,7 +564,8 @@ function renderLog(rec) {
           }
           ${tokenTag(rec)}
           ${timing.map((x) => `<span>${x}</span>`).join('')}
-          ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
+          ${warnList.length ? `<span class="warn">⚠ ${esc(warnList.join('；'))}</span>` : ''}
+          ${noteList.length ? `<span class="tag">${esc(noteList.map(noteLabel).join('；'))}</span>` : ''}
         </div>`;
     } else {
       body = `<div class="log-meta">${esc(rec.modelIn || '')} → ${esc(rec.modelOut || '')} ${tokenTag(rec)} ${timing.map((x) => `<span>${x}</span>`).join('')}</div>`;
@@ -609,7 +622,14 @@ function renderLog(rec) {
 
 function matchFilter(rec) {
   if (currentKind === 'all') return true;
-  if (currentKind === 'error-only') return rec.status === 'error' || rec.status === 'upstream_error' || (rec.warnings || []).length > 0;
+  // 0.11.1 曾把纯文本兜底写进 warnings；它不算错误，历史记录也按中性提示处理。
+  if (currentKind === 'error-only') {
+    return (
+      rec.status === 'error' ||
+      rec.status === 'upstream_error' ||
+      (rec.warnings || []).some((w) => w !== 'reply_wrapped_json')
+    );
+  }
   return kindOf(rec) === currentKind;
 }
 

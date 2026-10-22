@@ -10,9 +10,9 @@ import { usageTotal } from '../upstream.js';
 
 const OUTPUT_RULES = [
   '【你的输出规则】',
-  '1. 你只演你自己；只输出「括号里的动作/神态」+「台词」，台词必须以「名字：」开头（例如「章籽梦：……」）。',
+  '1. 你只演你自己；只输出你的一句台词，整句必须以「名字：」开头（例如「章籽梦：（动作）台词」），不要先写动作再补名字。',
   '2. 总长不超过 60 字；说完就停，不解释、不总结、不写旁白。',
-  '3. 不替玩家或其他人行动，不描述你看不到的场景，不写别人的心理活动。',
+  '3. 不替玩家或其他人行动，不描述你看不到的场景，不写别人的心理活动；对话记录里别人的台词不要复述、不要续写。',
   '4. 不得声称赠出或收下物品、不得宣称关系确立、不得宣称任务完成；不要输出 {GIFT} 这类占位符。',
   '5. 没有合适的话就说 <SILENT>（只输出这四个字符）。',
 ].join('\n');
@@ -43,9 +43,27 @@ export function sanitizeActorText(text, name) {
   if (!lines.length) return null;
 
   let out = lines.join('\n');
-  const prefix = `${name}：`;
-  // 模型常把名字写在动作括号之后（「（动作）纪澜之：台词」），因此按全文判断，避免补出两个名字
-  if (!out.includes(prefix) && !out.includes(`${name}:`)) out = prefix + out;
+  const prefixes = [`${name}：`, `${name}:`];
+  // 模型常把名字写在动作括号之后（「（动作）纪澜之：台词」）；统一挪到句首，
+  // 与 A 侧的「名字：（动作）台词」保持一致，避免共享对话里出现两个名字、顺序颠倒。
+  const movePrefix = (line) => {
+    let at = -1;
+    let hit = '';
+    for (const p of prefixes) {
+      const idx = line.indexOf(p);
+      if (idx > 0 && (at < 0 || idx < at)) {
+        at = idx;
+        hit = p;
+      }
+    }
+    if (at <= 0) return line;
+    const head = line.slice(0, at);
+    if (!/^\s*(?:（[^（）]*）\s*)+$/.test(head)) return line;
+    return hit + head.trim() + line.slice(at + hit.length);
+  };
+  out = lines.map(movePrefix).join('\n');
+  const hasName = prefixes.some((p) => out.includes(p));
+  if (!hasName) out = prefixes[0] + out;
   if (out.length > 90) {
     const cut = out.slice(0, 90);
     const idx = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('\n'));

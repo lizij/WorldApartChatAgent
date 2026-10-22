@@ -28,7 +28,7 @@ import {
 import { buildMemoryText, buildPromptsText, insertBeforeLastUser } from './memory/inject.js';
 import { Summarizer } from './memory/summarizer.js';
 import { MemoryRewriter } from './memory/rewriter.js';
-import { RequestRewriter } from './requestRewrite.js';
+import { RequestRewriter, wrapPlainReply } from './requestRewrite.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, messageText, sendJsonError, tokenUsage } from './upstream.js';
 import { KeyedQueue } from './locks.js';
@@ -52,7 +52,8 @@ const MEMORY_TEXT_MAX_CHARS = 200000;
 
 /** 输出格式强化提醒（注入与日志来源标注共用同一常量）。 */
 const FORMAT_REMINDER =
-  '再次提醒：本轮必须且只能输出系统要求的那个 JSON 对象（不要 JSON 代码围栏、不要解释、不要输出 JSON 之外的文字）。';
+  '再次提醒：本轮必须且只能输出系统要求的那个 JSON 对象（不要 JSON 代码围栏、不要解释、不要输出 JSON 之外的文字）。' +
+  'content 只写你本人这一轮的动作与台词，不要写成多说话人剧本，也不要替在场其他角色写「名字：台词」。';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -185,6 +186,38 @@ function parseNpcReply(text) {
   return out;
 }
 
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 剥掉 A 正文里替在场配角写的台词行（行首或括号动作后紧跟「B：」）。
+ * A 本不该代演 B；这类行会和系统插入的 B 台词重复，也会把 A 的历史带成多说话人剧本。
+ * 剥完为空时保留原文，避免整轮回复被清空。
+ * @returns {{text:string, stripped:boolean}}
+ */
+function stripCostarSpeech(raw, bName) {
+  const name = String(bName || '').trim();
+  if (!name) return { text: raw, stripped: false };
+  let parsed = null;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {}
+  const target =
+    parsed && typeof parsed === 'object' && typeof parsed.content === 'string' ? parsed.content : raw;
+  const lines = String(target).split(/\r?\n/);
+  const re = new RegExp(`^\\s*(?:（[^（）]*）\\s*)*${escapeRegExp(name)}[：:]`);
+  const kept = lines.filter((l) => !re.test(l));
+  if (kept.length === lines.length) return { text: raw, stripped: false };
+  const next = kept.join('\n');
+  // 整段都是 B 的台词时无法安全清空（游戏会收到空 content），保留原文但记账。
+  if (!next.trim()) return { text: raw, stripped: true };
+  if (parsed && typeof parsed === 'object' && typeof parsed.content === 'string') {
+    return { text: JSON.stringify({ ...parsed, content: next }), stripped: true };
+  }
+  return { text: next, stripped: true };
+}
+
 function turnIdOf() {
   return 't-' + Date.now().toString(36) + '-' + crypto.randomBytes(2).toString('hex');
 }
@@ -242,6 +275,8 @@ function buildCastBlock({ coStar, known, addressedB, outputStyle, aName }) {
   }
   lines.push(
     `${b}的台词由她本人应答，你不要替她写，也不要给她留“台词位”。`,
+    `历史回复里若出现「${b}：…」这类句子，那是系统插入的她的公开台词，不是你的发言；不要模仿这种多说话人写法。`,
+    '你输出的 content 里只能出现你自己的台词；不要以其他人的名字开头另起一行。',
     '她不替玩家行动，也不替你决定；她不知道你私下的事。',
     '可写 1~3 句，每句不超过 60 字；回应到点就停。',
     `emotion、control 与 intent 只描述你自己（${aName}）。`,
@@ -971,6 +1006,8 @@ export function createServer({ config, logger }) {
     let castChars = 0;
     let snapshotChanged = false;
     const warnings = [];
+    // 中性提示（不是故障）：例如纯文本回复已按当轮模板补成 JSON，只在日志里注明，不标红。
+    const notes = [];
     // 记录注入内容 → 来源，用于日志详情标注「游戏原始 / 游戏重写后 / 外置记忆 / 外置提示词 / 格式提醒」
     const injected = new Map();
     let rewriteInfo = null;
@@ -1220,6 +1257,7 @@ export function createServer({ config, logger }) {
               changedModules: rw.changedCount,
               repairedModules: rw.repairedCount,
               failedModules: rw.failedCount,
+              droppedModules: rw.droppedCount || 0,
               originalChars: rw.originalChars,
               rewrittenChars: rw.rewrittenChars,
               removedLines: rw.removedCount,
@@ -1233,12 +1271,19 @@ export function createServer({ config, logger }) {
             }
             if (rw.ok) {
               const messages = body.messages.slice();
+              const drops = [];
               for (const item of rw.items) {
                 if (item.group !== 'game') continue;
                 if (!item.ok || !item.changed) continue;
+                // 整节都在冲突、重写模型删空：直接删掉这条 system，而不是留一条空消息
+                if (item.droppedModule) {
+                  drops.push(item.index);
+                  continue;
+                }
                 messages[item.index] = { ...messages[item.index], content: item.rewritten };
                 injected.set(item.rewritten, 'game_rewritten');
               }
+              for (const idx of drops.sort((a, b) => b - a)) messages.splice(idx, 1);
               body = { ...body, messages };
               // 配角模块：只更新通过的改写
               for (const item of rw.items) {
@@ -1368,6 +1413,29 @@ export function createServer({ config, logger }) {
     }
 
     const finalBody = prepareUpstreamBody(body, c);
+    // 非流式兜底：A 替配角写的台词行先剥掉；回复不是 JSON 时再按当轮输出格式模板包回去。
+    let aImpersonated = false;
+    let plainWrapped = false;
+    const filterAssistantText =
+      cast && bCard
+        ? (text) => {
+            const r = stripCostarSpeech(text, bCard.name);
+            if (r.stripped) aImpersonated = true;
+            return r.text;
+          }
+        : null;
+    const wrapPlainContent = /##\s*输出格式/.test(info.system)
+      ? (text) => {
+          if (!text || !text.trim()) return null;
+          try {
+            const j = JSON.parse(text);
+            if (j && typeof j === 'object') return null;
+          } catch {}
+          const wrapped = wrapPlainReply(text, info.system);
+          if (wrapped) plainWrapped = true;
+          return wrapped;
+        }
+      : null;
     const detail = {
       kind: 'npc',
       turnId,
@@ -1428,6 +1496,7 @@ export function createServer({ config, logger }) {
               status: x.ok ? 'done' : 'failed',
               changed: !!x.changed,
               repaired: !!x.repaired,
+              dropped: !!x.droppedModule,
               error: x.error || null,
               originalChars: x.originalChars,
               rewrittenChars: x.rewrittenChars,
@@ -1445,6 +1514,7 @@ export function createServer({ config, logger }) {
             changedCount: detailRewrite.changedCount,
             repairedCount: detailRewrite.repairedCount,
             failedCount: detailRewrite.failedCount,
+            droppedCount: detailRewrite.droppedCount || 0,
             originalChars: detailRewrite.originalChars,
             rewrittenChars: detailRewrite.rewrittenChars,
             removedCount: detailRewrite.removedCount,
@@ -1463,6 +1533,8 @@ export function createServer({ config, logger }) {
       result = await forwardUpstream(finalBody, res, c, {
         injector: castInjector,
         injectorMode: castMode || 'head',
+        filterAssistantText,
+        wrapPlainContent,
       });
     } catch (err) {
       detail.error = err?.message || String(err);
@@ -1524,6 +1596,11 @@ export function createServer({ config, logger }) {
     if (cast && castInjector?.inserted && !parsedA.jsonOk) warnings.push('costar_fallback');
     // 槽位缺失时 B 根本没被请求，不能再记“选择沉默”
     if (cast && cast.shouldBSpeak && !bLine && !castInjector?.failed) warnings.push('costar_silent');
+    // A 在正文里替在场配角写了台词（非流式会被剥掉，仍记账便于定位）
+    if (aImpersonated) warnings.push('cast_a_wrote_costar');
+    // 非 JSON 回复：非流式会按当轮输出格式模板包回合法 JSON；流式只能记账
+    if (plainWrapped) notes.push('reply_wrapped_json');
+    else if (!parsedA.jsonOk) warnings.push('reply_not_json');
 
     const tokens = tokenUsage({
       usage: result.usage,
@@ -1582,7 +1659,9 @@ export function createServer({ config, logger }) {
         rewriteTokens,
         isNewNpc: bundle?.isNew || false,
         snapshotChanged,
+        replyJsonOk: parsedA.jsonOk,
         warnings,
+        ...(notes.length ? { notes } : {}),
         ttftMs: result.ttftMs,
         reasoningTtftMs: result.reasoningTtftMs,
         contentTtftMs: result.contentTtftMs,

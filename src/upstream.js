@@ -164,7 +164,15 @@ export async function forwardUpstream(
   body,
   clientRes,
   config,
-  { onFirstByte, onFirstContent, onFirstReasoning, injector = null, injectorMode = 'head' } = {},
+  {
+    onFirstByte,
+    onFirstContent,
+    onFirstReasoning,
+    injector = null,
+    injectorMode = 'head',
+    filterAssistantText = null,
+    wrapPlainContent = null,
+  } = {},
 ) {
   const up = config.upstream;
   const url = upstreamChatUrl(up.baseUrl);
@@ -294,21 +302,32 @@ export async function forwardUpstream(
       const raw = await upstreamRes.text();
       markFirst();
       let out = raw;
-      if (injector) {
-        let parsed = null;
-        try {
-          parsed = JSON.parse(raw);
-        } catch {}
-        const msg = parsed?.choices?.[0]?.message;
-        if (msg && typeof msg.content === 'string') {
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {}
+      const msg = parsed?.choices?.[0]?.message;
+      if (msg && typeof msg.content === 'string') {
+        let content = msg.content;
+        // 非流式：可先做确定性清理（例如剥掉 A 替配角写的台词），再注入/兜底包装。
+        if (typeof filterAssistantText === 'function') {
+          const filtered = filterAssistantText(content);
+          if (typeof filtered === 'string' && filtered) content = filtered;
+        }
+        if (injector) {
           // 非流式：整段文本一次注入（含 JSON 槽位定位与纯文本兜底）
-          msg.content = await injector.injectWholeText(msg.content);
-          out = JSON.stringify(parsed);
+          content = await injector.injectWholeText(content);
           injected = !!injector.inserted;
           if (injector.failed && injectorMode === 'head') {
             throw new Error('配角台词插入失败：未能定位 content 字段');
           }
         }
+        if (typeof wrapPlainContent === 'function') {
+          const wrapped = wrapPlainContent(content);
+          if (typeof wrapped === 'string' && wrapped) content = wrapped;
+        }
+        msg.content = content;
+        out = JSON.stringify(parsed);
       }
       flushHeadersOnce();
       clientRes.write(out);
