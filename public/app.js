@@ -59,6 +59,7 @@ async function loadConfig() {
   $('#rwMaxTokens').value = rw.maxTokens ?? 6000;
   $('#rwTimeout').value = rw.timeoutMs ?? 60000;
   $('#rwTemperature').value = rw.temperature ?? 0.2;
+  $('#rwCacheEnabled').checked = rw.cache?.enabled !== false;
   const cast = c.multiNpc || {};
   $('#castEnabled').checked = !!cast.enabled;
   $('#castMaxCoStars').value = cast.maxCoStars ?? 1;
@@ -133,6 +134,7 @@ $('#saveRewrite').addEventListener('click', async () => {
         maxTokens: Number($('#rwMaxTokens').value) || 6000,
         timeoutMs: Number($('#rwTimeout').value) || 60000,
         temperature: Number($('#rwTemperature').value),
+        cache: { enabled: $('#rwCacheEnabled').checked },
       },
     }),
   });
@@ -363,8 +365,9 @@ function renderDetail(d) {
   const rw = d.rewrite;
   let rewriteBlock = '';
   if (rw) {
-    const rwTok =
-      rw.tokens && rw.tokens.total != null
+    const rwTok = rw.cacheHit
+      ? '0'
+      : rw.tokens && rw.tokens.total != null
         ? `${rw.tokens.estimated ? '≈' : ''}${fmtTok(rw.tokens.total)} tok`
         : '—';
     const rwMessages = (rw.messages || [])
@@ -428,7 +431,7 @@ function renderDetail(d) {
     rewriteBlock = `
       <div class="detail-section">
         <h5>请求重写（实验性）· ${rwLabel}</h5>
-        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}</p>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}${rw.cacheHit ? ` · <strong>命中缓存</strong>（省 ${rw.savedDurationMs || 0}ms / ${fmtTok(rw.savedTokens || 0)} tok${rw.cacheAgeMs != null ? `，缓存 ${Math.round(rw.cacheAgeMs / 1000)} 秒前` : ''}）` : ''}</p>
         ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
         ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
         <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>
@@ -554,11 +557,19 @@ function renderLog(rec) {
                       ? '部分成功'
                       : '失败'
                 }${
-                  rec.rewrite.changedModules != null
-                    ? ` 改写 ${rec.rewrite.changedModules}/${rec.rewrite.modules} 模块`
-                    : ''
-                }${rec.rewrite.durationMs != null ? ' ' + rec.rewrite.durationMs + 'ms' : ''}${
-                  rec.rewriteTokens != null ? ' · ' + fmtTok(rec.rewriteTokens) + ' tok' : ''
+                  rec.rewrite.cacheHit
+                    ? ` 缓存命中 · 省 ${
+                        rec.rewrite.savedDurationMs
+                          ? Math.round(rec.rewrite.savedDurationMs / 1000) + 's'
+                          : '—'
+                      } / ${fmtTok(rec.rewrite.savedTokens || 0)} tok`
+                    : `${
+                        rec.rewrite.changedModules != null
+                          ? ` 改写 ${rec.rewrite.changedModules}/${rec.rewrite.modules} 模块`
+                          : ''
+                      }${rec.rewrite.durationMs != null ? ' ' + rec.rewrite.durationMs + 'ms' : ''}${
+                        rec.rewriteTokens != null ? ' · ' + fmtTok(rec.rewriteTokens) + ' tok' : ''
+                      }`
                 }</span>`
               : ''
           }

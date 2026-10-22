@@ -115,6 +115,13 @@ export function defaults() {
       maxTokens: 6000,
       timeoutMs: 60000,
       temperature: 0.2,
+      // 整轮精确缓存：重写请求体（全部 system 模块 + 记忆 + 提示词 + 模型参数）
+      // 逐字节相同时直接复用上次已校验的结果，跳过上游调用。不改变输入、输出与校验逻辑。
+      cache: {
+        enabled: true,
+        maxEntries: 4,
+        ttlDays: 7,
+      },
     },
     // 多 NPC 共演（实验性）：默认关闭。开启后每轮可能多一次配角请求，
     // token 与延迟都会增加；关闭时请求体与原先逐字节一致。

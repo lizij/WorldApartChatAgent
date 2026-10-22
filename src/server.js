@@ -543,6 +543,14 @@ export function createServer({ config, logger }) {
       if (to !== undefined) safe.requestRewrite.timeoutMs = to;
       const temp = Number(rw.temperature);
       if (Number.isFinite(temp)) safe.requestRewrite.temperature = Math.min(Math.max(temp, 0), 2);
+      if (rw.cache && typeof rw.cache === 'object') {
+        safe.requestRewrite.cache = {};
+        if (rw.cache.enabled !== undefined) safe.requestRewrite.cache.enabled = !!rw.cache.enabled;
+        const me = intIn(rw.cache.maxEntries, 1, 100);
+        if (me !== undefined) safe.requestRewrite.cache.maxEntries = me;
+        const ttl = intIn(rw.cache.ttlDays, 0, 3650);
+        if (ttl !== undefined) safe.requestRewrite.cache.ttlDays = ttl;
+      }
     }
     // 多 NPC 共演（实验性）
     if (patch.multiNpc && typeof patch.multiNpc === 'object') {
@@ -1248,10 +1256,16 @@ export function createServer({ config, logger }) {
               promptsText,
               signal: clientAc.signal,
             });
-            rewriteTokens = rw.tokens?.total ?? null;
+            // 命中缓存时本轮没有真实重写消耗；token 数记 0，原本要花的量放到 savedTokens。
+            rewriteTokens = rw.cacheHit ? 0 : rw.tokens?.total ?? null;
             rewriteInfo = {
               status: rw.status,
               durationMs: rw.durationMs,
+              cacheHit: !!rw.cacheHit,
+              cacheAgeMs: rw.cacheAgeMs ?? null,
+              savedDurationMs: rw.savedDurationMs || 0,
+              savedTokens: rw.savedTokens || 0,
+              cacheKey: rw.cache?.key || null,
               tokens: rw.tokens || null,
               modules: rw.moduleCount,
               changedModules: rw.changedCount,

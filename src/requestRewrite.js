@@ -9,8 +9,18 @@
  *   - 单个模块校验失败时只回退该模块，其余模块照常生效；
  *   - 外置内容不参与重写（它们在重写之后才注入），避免被模型二次改写。
  */
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import { upstreamChatUrl } from './config.js';
 import { tokenUsage } from './upstream.js';
+import { NPCS_DIR } from './memory/store.js';
+
+/** 重写缓存协议版本：重写 prompt、校验规则或缓存结构变更时必须递增。 */
+const CACHE_VERSION = 1;
+const CACHE_FILE = 'rewrite-cache.json';
+/** 同一 NPC + 同一请求体的并发重写只打一次上游。 */
+const inflight = new Map();
 
 const SYSTEM_PROMPT = [
   '你是游戏 NPC 对话请求的预处理器。游戏会把 NPC 的设定与规则拆成多条 system 模块',
@@ -398,6 +408,71 @@ function parseModules(text, expectedIds) {
   return { map };
 }
 
+function cacheFilePath(slug) {
+  return path.join(NPCS_DIR, slug, CACHE_FILE);
+}
+
+function clampInt(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(Math.max(Math.floor(n), min), max);
+}
+
+/** 读缓存；损坏、结构不符或已过期的条目直接丢弃。 */
+function loadCache(slug, ttlMs) {
+  const file = cacheFilePath(slug);
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return { file, entries: [] };
+  }
+  const now = Date.now();
+  const entries = Array.isArray(data?.entries)
+    ? data.entries.filter(
+        (e) =>
+          e &&
+          typeof e.key === 'string' &&
+          typeof e.raw === 'string' &&
+          (!ttlMs || now - (Number(e.createdAt) || 0) <= ttlMs),
+      )
+    : [];
+  return { file, entries };
+}
+
+function saveCache(file, entries, maxEntries) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(
+      file,
+      JSON.stringify({ version: CACHE_VERSION, entries: entries.slice(0, maxEntries) }),
+      'utf8',
+    );
+  } catch {
+    // 缓存只用于加速，写失败不影响本轮
+  }
+}
+
+/** 缓存键：最终发给上游的完整请求体 + 上游地址 + 缓存协议版本。 */
+function cacheKeyOf(slug, body, baseUrl) {
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        v: CACHE_VERSION,
+        slug,
+        baseUrl,
+        model: body.model,
+        temperature: body.temperature,
+        max_tokens: body.max_tokens,
+        stream: body.stream,
+        thinking: body.thinking,
+        messages: body.messages,
+      }),
+    )
+    .digest('hex');
+}
+
 export class RequestRewriter {
   constructor({ config }) {
     // config 是 ConfigStore：每次取值都 get()，保证管理页热更新即时生效
@@ -406,6 +481,39 @@ export class RequestRewriter {
 
   get config() {
     return this.store.get();
+  }
+
+  /** 单次上游调用（非流式）。返回原始回复与 usage，由调用方统一解析、校验。 */
+  async #fetch(requestBody, timeoutMs, signal) {
+    const up = this.config.upstream;
+    if (up.insecureTLS) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error('请求重写超时')), timeoutMs);
+    const onAbort = () => ac.abort(new Error('客户端已断开'));
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
+    try {
+      const res = await fetch(upstreamChatUrl(up.baseUrl), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${up.apiKey}` },
+        body: JSON.stringify(requestBody),
+        signal: ac.signal,
+      });
+      if (!res.ok) {
+        const text = (await res.text().catch(() => '')).slice(0, 300);
+        throw new Error(`上游 ${res.status}: ${text}`);
+      }
+      const json = await res.json();
+      return {
+        raw: json?.choices?.[0]?.message?.content || '',
+        usage: json?.usage || null,
+      };
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+    }
   }
 
   /**
@@ -461,37 +569,58 @@ export class RequestRewriter {
     const timeoutMs = Math.max(1000, Number(c.timeoutMs) || 60000);
     const temperature = Number.isFinite(Number(c.temperature)) ? Number(c.temperature) : 0.2;
 
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(new Error('请求重写超时')), timeoutMs);
-    const onAbort = () => ac.abort(new Error('客户端已断开'));
-    if (signal) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
+    const requestBody = {
+      model: up.model,
+      temperature,
+      max_tokens: maxTokens,
+      stream: false,
+      thinking: { type: 'disabled' },
+      messages,
+    };
+
+    // 整轮精确缓存：最终请求体逐字节相同才复用；任何变化都会落到 miss，走完整重写。
+    const cacheCfg = c.cache || {};
+    const cacheOn = !!slug && cacheCfg.enabled !== false;
+    const cacheKey = cacheOn ? cacheKeyOf(slug, requestBody, upstreamChatUrl(up.baseUrl)) : null;
+    const maxEntries = clampInt(cacheCfg.maxEntries, 1, 100, 4);
+    const ttlMs = Math.max(0, Number(cacheCfg.ttlDays) || 0) * 86400000;
+    const cacheState = cacheOn ? loadCache(slug, ttlMs) : null;
+    const cached = cacheState ? cacheState.entries.find((e) => e.key === cacheKey) || null : null;
+
+    let raw = '';
+    let usage = null;
+    let upstreamMs = 0;
+    let cacheHit = false;
+    let cacheAgeMs = null;
+
+    if (cached) {
+      raw = cached.raw;
+      usage = cached.usage || null;
+      cacheHit = true;
+      cacheAgeMs = Date.now() - (Number(cached.createdAt) || 0);
+      // 命中项移到最前，维持 LRU 顺序
+      cacheState.entries = [cached, ...cacheState.entries.filter((e) => e.key !== cacheKey)];
+      saveCache(cacheState.file, cacheState.entries, maxEntries);
+    } else {
+      const flightKey = cacheOn ? `${slug}|${cacheKey}` : null;
+      let flight = flightKey ? inflight.get(flightKey) : null;
+      if (!flight) {
+        flight = this.#fetch(requestBody, timeoutMs, signal);
+        if (flightKey) {
+          inflight.set(flightKey, flight);
+          flight.finally(() => inflight.delete(flightKey)).catch(() => {});
+        }
+      }
+      const result = await flight;
+      raw = result.raw;
+      usage = result.usage;
+      upstreamMs = Date.now() - started;
     }
 
-    try {
-      const res = await fetch(upstreamChatUrl(up.baseUrl), {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${up.apiKey}` },
-        body: JSON.stringify({
-          model: up.model,
-          temperature,
-          max_tokens: maxTokens,
-          stream: false,
-          thinking: { type: 'disabled' },
-          messages,
-        }),
-        signal: ac.signal,
-      });
-      if (!res.ok) {
-        const text = (await res.text().catch(() => '')).slice(0, 300);
-        throw new Error(`上游 ${res.status}: ${text}`);
-      }
-      const json = await res.json();
-      const raw = json?.choices?.[0]?.message?.content || '';
-      const usage = json?.usage || null;
-      const durationMs = Date.now() - started;
+    const durationMs = Date.now() - started;
 
+    // 命中缓存时也重新解析、校验一遍，确保旧结果仍符合当前校验规则。
+    {
       const parsed = parseModules(stripFences(raw), new Set(all.map((_, id) => id)));
       const items = all.map((s, id) => {
         const original = s.content;
@@ -548,6 +677,23 @@ export class RequestRewriter {
             ? 'partial'
             : 'failed';
       const reply = items.map((x) => x.draft ?? x.rewritten).join('\n');
+      const tokens = tokenUsage({ usage, messages, reply });
+
+      // 只缓存完整成功的结果；failed / partial 下次重新尝试，避免把偶发失败固化。
+      if (cacheOn && !cacheHit && status === 'done') {
+        const entry = {
+          key: cacheKey,
+          createdAt: Date.now(),
+          durationMs: upstreamMs,
+          usage,
+          raw,
+        };
+        saveCache(
+          cacheState.file,
+          [entry, ...cacheState.entries.filter((e) => e.key !== cacheKey)],
+          maxEntries,
+        );
+      }
 
       return {
         ok: status !== 'failed',
@@ -566,7 +712,19 @@ export class RequestRewriter {
         addedCount: items.reduce((n, x) => n + x.addedCount, 0),
         durationMs,
         usage,
-        tokens: tokenUsage({ usage, messages, reply }),
+        tokens,
+        cacheHit,
+        cacheAgeMs,
+        savedDurationMs: cacheHit ? Number(cached.durationMs) || 0 : 0,
+        savedTokens: cacheHit ? tokens.total ?? 0 : 0,
+        cache: cacheOn
+          ? {
+              enabled: true,
+              hit: cacheHit,
+              key: cacheKey.slice(0, 16),
+              entries: cacheState.entries.length,
+            }
+          : { enabled: false, hit: false },
         messages,
         request: {
           model: up.model,
@@ -577,9 +735,6 @@ export class RequestRewriter {
           messageCount: messages.length,
         },
       };
-    } finally {
-      clearTimeout(timer);
-      if (signal) signal.removeEventListener('abort', onAbort);
     }
   }
 }

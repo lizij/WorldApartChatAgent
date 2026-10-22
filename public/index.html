@@ -137,6 +137,8 @@
       <div class="kv">
         <label class="check"><input type="checkbox" id="rwEnabled" /> 启用请求重写（默认关闭）</label>
         <p class="hint">启用后，每次 NPC 对话会先额外调用一次上游模型，<strong>逐条改写游戏下发的全部 system 模块</strong>（角色设定、场景、任务、输出格式等，真实请求通常有多条），删除或改写其中与本工具外置提示词／长期记忆冲突的部分，再生成回复。首字延迟与 token 消耗都会明显增加；重写失败或单个模块校验不通过时，该模块自动回退原文。</p>
+        <label class="check"><input type="checkbox" id="rwCacheEnabled" /> 启用重写缓存（默认启用）</label>
+        <p class="hint">整份重写输入（全部 system 模块 + 长期记忆 + 提示词 + 模型参数）与上次逐字节相同时，直接复用上次已校验的结果，跳过本次上游调用；输入有任何变化都会重新完整重写。只缓存成功结果，不改变重写内容与校验逻辑。</p>
         <div class="grid three advanced">
           <label>重写输出上限（tokens，不足时自动上调）<input type="number" id="rwMaxTokens" min="500" step="500" /></label>
           <label>重写超时（毫秒）<input type="number" id="rwTimeout" min="5000" step="5000" /></label>
