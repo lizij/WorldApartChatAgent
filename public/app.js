@@ -59,7 +59,7 @@ async function loadConfig() {
   $('#rwMaxTokens').value = rw.maxTokens ?? 6000;
   $('#rwTimeout').value = rw.timeoutMs ?? 60000;
   $('#rwTemperature').value = rw.temperature ?? 0.2;
-  $('#rwCacheEnabled').checked = rw.cache?.enabled !== false;
+  $('#rwCacheMode').value = rw.cache?.mode === 'exact' ? 'exact' : 'none';
   const cast = c.multiNpc || {};
   $('#castEnabled').checked = !!cast.enabled;
   $('#castMaxCoStars').value = cast.maxCoStars ?? 1;
@@ -134,7 +134,7 @@ $('#saveRewrite').addEventListener('click', async () => {
         maxTokens: Number($('#rwMaxTokens').value) || 6000,
         timeoutMs: Number($('#rwTimeout').value) || 60000,
         temperature: Number($('#rwTemperature').value),
-        cache: { enabled: $('#rwCacheEnabled').checked },
+        cache: { mode: $('#rwCacheMode').value },
       },
     }),
   });
@@ -558,7 +558,7 @@ function renderLog(rec) {
                       : '失败'
                 }${
                   rec.rewrite.cacheHit
-                    ? ` 缓存命中 · 省 ${
+                    ? ` ${rec.rewrite.cacheMode === 'exact' ? '机制 1 ' : ''}缓存命中 · 省 ${
                         rec.rewrite.savedDurationMs
                           ? Math.round(rec.rewrite.savedDurationMs / 1000) + 's'
                           : '—'

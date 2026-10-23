@@ -41,6 +41,14 @@ function pkgVersion() {
 }
 export const VERSION = process.env.WFC_VERSION || pkgVersion();
 
+/**
+ * 请求重写缓存机制白名单。后续新增机制时在这里登记，并在
+ * requestRewrite.js / 管理页下拉菜单中补对应实现与选项。
+ *   none  不启用
+ *   exact 机制 1：整轮指纹缓存（最终重写请求体逐字节相同才复用）
+ */
+export const REWRITE_CACHE_MODES = ['none', 'exact'];
+
 function randomKey() {
   return 'wfc-' + crypto.randomBytes(20).toString('hex');
 }
@@ -115,10 +123,10 @@ export function defaults() {
       maxTokens: 6000,
       timeoutMs: 60000,
       temperature: 0.2,
-      // 整轮精确缓存：重写请求体（全部 system 模块 + 记忆 + 提示词 + 模型参数）
-      // 逐字节相同时直接复用上次已校验的结果，跳过上游调用。不改变输入、输出与校验逻辑。
+      // 缓存机制（默认不启用）：none | exact。
+      // exact = 机制 1「整轮指纹缓存」：最终重写请求体逐字节相同时复用上次已验证结果。
       cache: {
-        enabled: true,
+        mode: 'none',
         maxEntries: 4,
         ttlDays: 7,
       },
@@ -196,6 +204,24 @@ export class ConfigStore {
       }
       delete user.style;
       migrated = true;
+    }
+
+    // 0.12.x 的 requestRewrite.cache.enabled（布尔）→ cache.mode（机制名）。
+    // 保留玩家原有选择：enabled=true → exact，false → none；删掉旧键，避免双来源。
+    const rwCache = user && typeof user === 'object' ? user.requestRewrite?.cache : null;
+    if (rwCache && typeof rwCache === 'object') {
+      if (typeof rwCache.mode !== 'string') {
+        rwCache.mode = rwCache.enabled === false ? 'none' : 'exact';
+        migrated = true;
+      }
+      if ('enabled' in rwCache) {
+        delete rwCache.enabled;
+        migrated = true;
+      }
+      if (!REWRITE_CACHE_MODES.includes(rwCache.mode)) {
+        rwCache.mode = 'none';
+        migrated = true;
+      }
     }
 
     this.cfg = deepMerge(d, user);

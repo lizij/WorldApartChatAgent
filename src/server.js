@@ -9,7 +9,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR, IS_TEST, PUBLIC_DIR, VERSION, upstreamChatUrl } from './config.js';
+import {
+  DATA_DIR,
+  IS_TEST,
+  PUBLIC_DIR,
+  VERSION,
+  REWRITE_CACHE_MODES,
+  upstreamChatUrl,
+} from './config.js';
 import { classify } from './identify.js';
 import {
   openNpc,
@@ -545,7 +552,17 @@ export function createServer({ config, logger }) {
       if (Number.isFinite(temp)) safe.requestRewrite.temperature = Math.min(Math.max(temp, 0), 2);
       if (rw.cache && typeof rw.cache === 'object') {
         safe.requestRewrite.cache = {};
-        if (rw.cache.enabled !== undefined) safe.requestRewrite.cache.enabled = !!rw.cache.enabled;
+        let mode;
+        if (typeof rw.cache.mode === 'string') {
+          mode = rw.cache.mode.trim();
+          if (!REWRITE_CACHE_MODES.includes(mode)) {
+            return sendJsonError(res, 400, 'bad_request', `未知的重写缓存机制: ${mode}`);
+          }
+        } else if (rw.cache.enabled !== undefined) {
+          // 兼容 0.12.x 的布尔开关
+          mode = rw.cache.enabled ? 'exact' : 'none';
+        }
+        if (mode) safe.requestRewrite.cache.mode = mode;
         const me = intIn(rw.cache.maxEntries, 1, 100);
         if (me !== undefined) safe.requestRewrite.cache.maxEntries = me;
         const ttl = intIn(rw.cache.ttlDays, 0, 3650);
@@ -1261,6 +1278,7 @@ export function createServer({ config, logger }) {
             rewriteInfo = {
               status: rw.status,
               durationMs: rw.durationMs,
+              cacheMode: rw.cache?.mode || 'none',
               cacheHit: !!rw.cacheHit,
               cacheAgeMs: rw.cacheAgeMs ?? null,
               savedDurationMs: rw.savedDurationMs || 0,

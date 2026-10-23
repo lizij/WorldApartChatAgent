@@ -578,9 +578,11 @@ export class RequestRewriter {
       messages,
     };
 
-    // 整轮精确缓存：最终请求体逐字节相同才复用；任何变化都会落到 miss，走完整重写。
+    // 缓存机制：当前只有 none / exact（机制 1「整轮指纹缓存」）。
+    // 后续新增机制时在这里分派各自的 key / load / store 策略。
     const cacheCfg = c.cache || {};
-    const cacheOn = !!slug && cacheCfg.enabled !== false;
+    const cacheMode = cacheCfg.mode === 'exact' ? 'exact' : 'none';
+    const cacheOn = !!slug && cacheMode === 'exact';
     const cacheKey = cacheOn ? cacheKeyOf(slug, requestBody, upstreamChatUrl(up.baseUrl)) : null;
     const maxEntries = clampInt(cacheCfg.maxEntries, 1, 100, 4);
     const ttlMs = Math.max(0, Number(cacheCfg.ttlDays) || 0) * 86400000;
@@ -717,14 +719,13 @@ export class RequestRewriter {
         cacheAgeMs,
         savedDurationMs: cacheHit ? Number(cached.durationMs) || 0 : 0,
         savedTokens: cacheHit ? tokens.total ?? 0 : 0,
-        cache: cacheOn
-          ? {
-              enabled: true,
-              hit: cacheHit,
-              key: cacheKey.slice(0, 16),
-              entries: cacheState.entries.length,
-            }
-          : { enabled: false, hit: false },
+        cache: {
+          mode: cacheMode,
+          enabled: cacheOn,
+          hit: cacheHit,
+          key: cacheOn ? cacheKey.slice(0, 16) : null,
+          entries: cacheOn ? cacheState.entries.length : 0,
+        },
         messages,
         request: {
           model: up.model,
