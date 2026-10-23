@@ -166,7 +166,7 @@
 | `prompts.global` | 全局提示词（对所有 NPC 生效，留空不注入；上限 4000 字）。逐 NPC 个人提示与「是否叠加全局」存于 `data/npcs/<slug>/prompt.json`。旧键 `style` 会在启动时自动迁移为 `prompts` |
 | `requestRewrite.enabled` | **实验性**请求重写总开关（默认 `false`）。每轮 NPC 对话额外调用一次上游，逐条改写**全部**游戏 system 模块；额外 token 消耗与首字延迟明显增加 |
 | `requestRewrite.maxTokens/timeoutMs/temperature` | 重写调用参数：输出上限 6000（按模块总字数自动上调，最高 20000）/ 超时 60s / 温度 0.2；内部调用恒定 `thinking:{type:"disabled"}` |
-| `requestRewrite.cache.mode/maxEntries/ttlDays` | 重写缓存机制（默认 `none` / 4 条 / 7 天）。`none` = 不启用；`exact` = **机制 1「整轮指纹缓存」**：最终请求体（全部 system 模块 + 记忆 + 提示词 + 模型参数 + 上游地址）逐字节相同时复用上次**已校验通过**的结果，`failed/partial` 不缓存。后续机制在 `REWRITE_CACHE_MODES` 登记。0.12.x 的布尔 `enabled` 启动时自动迁移为 `mode` |
+| `requestRewrite.cache.mode/maxEntries/ttlDays` | 重写缓存机制（默认 `none` / 全局 1000 条 / 7 天）。`none` = 不启用；`exact` = **机制 1「整轮指纹缓存」**：最终请求体（全部 system 模块 + 记忆 + 提示词 + 模型参数 + 上游地址）逐字节相同时复用上次**已校验通过**的结果，`failed/partial` 不缓存。每个机制单独一个全局文件 `data/rewrite-cache-<mode>.json`；后续机制在 `REWRITE_CACHE_MODES` 登记。0.12.x 的布尔 `enabled` 启动时自动迁移为 `mode` |
 | `multiNpc.enabled` | **实验性**多 NPC 共演总开关（默认 `false`）。关闭时请求体与输出逐字节不变 |
 | `multiNpc.maxCoStars/maxCallsPerTurn` | 同场配角上限（默认 1）/ 一轮最多几次 NPC 发言调用（默认 2；1 = 只跑主角） |
 | `multiNpc.speakPolicy/outputStyle/allowASilence` | 配角开口策略 `addressed/always` / 多人输出格式 `script/inherit` / 允许主角只给在旁反应 |
@@ -225,6 +225,7 @@ WorldApartProject/
 ```
 data/  或  data_test/
 ├─ config.json
+├─ rewrite-cache-exact.json   # 机制 1 全局 LRU 缓存（默认 1000 条，防抖落盘）
 ├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / memory_edit / config / server / auth
 ├─ logs/details/YYYY-MM-DD.jsonl # 请求详情（完整 prompt / 思维链 / 回复 / usage），保留 14 天
 └─ npcs/<slug>/
@@ -234,7 +235,6 @@ data/  或  data_test/
    ├─ aliases.json            # 玩家可编辑的别名 {names:[]}（可选；共演点名识别用）
    ├─ cast.json               # 是否允许作为配角参与共演 {enabled:true}（可选；缺失=关闭）
    ├─ stage.json              # 共演在场状态 {sceneKey,onStage,updatedAt}（可选）
-   ├─ rewrite-cache.json      # 机制 1 整轮指纹缓存（按最终请求体哈希，LRU 默认 4 条，可关）
    ├─ conversations.jsonl     # 该 NPC 的完整会话历史（每轮玩家/NPC 各一条，只追加）
    ├─ backups/memory-<时间戳>.md # 「AI 修改记忆」保存前的时间戳备份（全部保留，可手工回滚）
    └─ intake/<时间>.md         # system 原文快照（首见或内容变化时）
@@ -275,10 +275,13 @@ data/  或  data_test/
   键 = 最终发给上游的完整请求体（全部 system 模块原文及顺序、外置记忆、外置提示词、
   model/temperature/max_tokens/thinking）+ 上游地址 + `CACHE_VERSION`。逐字节相同才复用上次
   已校验通过的原始回复，并**重新跑一遍解析/校验**；输入、模型或重写 prompt 任一变化都会 miss，
-  仍走完整重写。只有 `status=done` 入缓存，`failed/partial` 下次重试。存储于
-  `data/npcs/<slug>/rewrite-cache.json`（LRU 默认 4 条、TTL 默认 7 天），只加速、不改语义；
-  `mode=none` 时请求体与未加缓存逐字节一致。后续缓存机制沿用同一配置结构，在
-  `REWRITE_CACHE_MODES` 与管理页下拉菜单中追加。
+  仍走完整重写。只有 `status=done` 入缓存，`failed/partial` 下次重试。
+  **全局存储**：每个机制一个 `data/rewrite-cache-<mode>.json`（机制 1 =
+  `data/rewrite-cache-exact.json`），运行期在内存 LRU 中读写，变更后防抖异步落盘；
+  默认上限 1000 条，超出淘汰最久未用，TTL 默认 7 天。键里已含 slug，不需要按 NPC 分文件。
+  首次加载会把旧版 `data/npcs/<slug>/rewrite-cache.json` 合并进全局文件，成功落盘后删除旧文件。
+  只加速、不改语义；`mode=none` 时请求体与未加缓存逐字节一致。管理页用「短名 + 悬浮说明」的
+  单选行展示机制，后续机制在 `REWRITE_CACHE_MODES` 与前端 `CACHE_MODE_OPTIONS` 中追加。
 - **摘要 prompt：状态型分区模板**（2026-10-16 重构，修掉"流水账"；2026-10-17 修掉"账目/归属"缺陷）。
   产物必须是【当前状态清单】而非事件日记：固定六分区【身份与称呼】【当前关系】【未了之事】【赠予往来】
   【习惯与忌讳】【玩家所述，未经证实】；用现在时陈述状态；**禁止**"本轮/当夜/第二次后/随后"这类过程口径；

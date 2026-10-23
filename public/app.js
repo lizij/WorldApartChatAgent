@@ -26,6 +26,47 @@ function setConn(on) {
   el.lastChild.textContent = on ? ' 服务运行中' : ' 服务已断开';
 }
 
+// —— 请求重写缓存机制（短名 + 悬浮说明；后续机制在这里追加）——
+const CACHE_MODE_OPTIONS = [
+  {
+    value: 'none',
+    label: '不启用',
+    desc: '每次请求都完整重写，不读取也不写入缓存。',
+  },
+  {
+    value: 'exact',
+    label: '整轮指纹缓存',
+    desc: '整份重写输入（全部 system 模块、长期记忆、提示词、模型参数）逐字节相同时，复用上次已校验的结果；输入有任何变化都会完整重写。全局 LRU 默认 1000 条。历史命中率约 50%，命中轮中位耗时约 3 秒。',
+  },
+];
+
+function cacheModeSelected() {
+  return document.querySelector('input[name="rwCacheMode"]:checked')?.value || 'none';
+}
+
+function updateCacheModeHint() {
+  const hint = $('#rwCacheModeHint');
+  if (!hint) return;
+  const mode = cacheModeSelected();
+  hint.textContent = (CACHE_MODE_OPTIONS.find((x) => x.value === mode) || {}).desc || '';
+}
+
+/** 渲染单选行；每项 title 提供鼠标悬浮说明，选中项说明同时显示在下方。 */
+function renderCacheModes(selected = 'none') {
+  const host = $('#rwCacheModes');
+  if (!host) return;
+  host.innerHTML = CACHE_MODE_OPTIONS.map(
+    (o) =>
+      `<label class="cache-mode" title="${esc(o.desc)}">` +
+      `<input type="radio" name="rwCacheMode" value="${esc(o.value)}"${o.value === selected ? ' checked' : ''} />` +
+      `<span>${esc(o.label)}</span></label>`,
+  ).join('');
+  host.querySelectorAll('input[name="rwCacheMode"]').forEach((el) => {
+    el.addEventListener('change', updateCacheModeHint);
+  });
+  updateCacheModeHint();
+}
+
 // —— 配置 ——
 async function loadStatus() {
   const s = await api('/api/status');
@@ -59,7 +100,7 @@ async function loadConfig() {
   $('#rwMaxTokens').value = rw.maxTokens ?? 6000;
   $('#rwTimeout').value = rw.timeoutMs ?? 60000;
   $('#rwTemperature').value = rw.temperature ?? 0.2;
-  $('#rwCacheMode').value = rw.cache?.mode === 'exact' ? 'exact' : 'none';
+  renderCacheModes(rw.cache?.mode === 'exact' ? 'exact' : 'none');
   const cast = c.multiNpc || {};
   $('#castEnabled').checked = !!cast.enabled;
   $('#castMaxCoStars').value = cast.maxCoStars ?? 1;
@@ -134,7 +175,7 @@ $('#saveRewrite').addEventListener('click', async () => {
         maxTokens: Number($('#rwMaxTokens').value) || 6000,
         timeoutMs: Number($('#rwTimeout').value) || 60000,
         temperature: Number($('#rwTemperature').value),
-        cache: { mode: $('#rwCacheMode').value },
+        cache: { mode: cacheModeSelected() },
       },
     }),
   });
@@ -889,6 +930,7 @@ async function loadNpcDetail(slug, name) {
 }
 
 // 初始化
+renderCacheModes('none');
 loadStatus().catch(() => setConn(false));
 loadConfig().catch(() => {});
 connectEvents();

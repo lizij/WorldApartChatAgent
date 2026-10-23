@@ -9,16 +9,13 @@
  *   - 单个模块校验失败时只回退该模块，其余模块照常生效；
  *   - 外置内容不参与重写（它们在重写之后才注入），避免被模型二次改写。
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { upstreamChatUrl } from './config.js';
 import { tokenUsage } from './upstream.js';
-import { NPCS_DIR } from './memory/store.js';
+import { rewriteCache } from './rewriteCache.js';
 
 /** 重写缓存协议版本：重写 prompt、校验规则或缓存结构变更时必须递增。 */
 const CACHE_VERSION = 1;
-const CACHE_FILE = 'rewrite-cache.json';
 /** 同一 NPC + 同一请求体的并发重写只打一次上游。 */
 const inflight = new Map();
 
@@ -408,49 +405,10 @@ function parseModules(text, expectedIds) {
   return { map };
 }
 
-function cacheFilePath(slug) {
-  return path.join(NPCS_DIR, slug, CACHE_FILE);
-}
-
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(Math.max(Math.floor(n), min), max);
-}
-
-/** 读缓存；损坏、结构不符或已过期的条目直接丢弃。 */
-function loadCache(slug, ttlMs) {
-  const file = cacheFilePath(slug);
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return { file, entries: [] };
-  }
-  const now = Date.now();
-  const entries = Array.isArray(data?.entries)
-    ? data.entries.filter(
-        (e) =>
-          e &&
-          typeof e.key === 'string' &&
-          typeof e.raw === 'string' &&
-          (!ttlMs || now - (Number(e.createdAt) || 0) <= ttlMs),
-      )
-    : [];
-  return { file, entries };
-}
-
-function saveCache(file, entries, maxEntries) {
-  try {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ version: CACHE_VERSION, entries: entries.slice(0, maxEntries) }),
-      'utf8',
-    );
-  } catch {
-    // 缓存只用于加速，写失败不影响本轮
-  }
 }
 
 /** 缓存键：最终发给上游的完整请求体 + 上游地址 + 缓存协议版本。 */
@@ -584,10 +542,9 @@ export class RequestRewriter {
     const cacheMode = cacheCfg.mode === 'exact' ? 'exact' : 'none';
     const cacheOn = !!slug && cacheMode === 'exact';
     const cacheKey = cacheOn ? cacheKeyOf(slug, requestBody, upstreamChatUrl(up.baseUrl)) : null;
-    const maxEntries = clampInt(cacheCfg.maxEntries, 1, 100, 4);
+    const maxEntries = clampInt(cacheCfg.maxEntries, 1, 10000, 1000);
     const ttlMs = Math.max(0, Number(cacheCfg.ttlDays) || 0) * 86400000;
-    const cacheState = cacheOn ? loadCache(slug, ttlMs) : null;
-    const cached = cacheState ? cacheState.entries.find((e) => e.key === cacheKey) || null : null;
+    const cached = cacheOn ? rewriteCache.get(cacheMode, cacheKey, { ttlMs }) : null;
 
     let raw = '';
     let usage = null;
@@ -600,9 +557,6 @@ export class RequestRewriter {
       usage = cached.usage || null;
       cacheHit = true;
       cacheAgeMs = Date.now() - (Number(cached.createdAt) || 0);
-      // 命中项移到最前，维持 LRU 顺序
-      cacheState.entries = [cached, ...cacheState.entries.filter((e) => e.key !== cacheKey)];
-      saveCache(cacheState.file, cacheState.entries, maxEntries);
     } else {
       const flightKey = cacheOn ? `${slug}|${cacheKey}` : null;
       let flight = flightKey ? inflight.get(flightKey) : null;
@@ -690,11 +644,7 @@ export class RequestRewriter {
           usage,
           raw,
         };
-        saveCache(
-          cacheState.file,
-          [entry, ...cacheState.entries.filter((e) => e.key !== cacheKey)],
-          maxEntries,
-        );
+        rewriteCache.set(cacheMode, cacheKey, entry, { maxEntries });
       }
 
       return {
@@ -724,7 +674,7 @@ export class RequestRewriter {
           enabled: cacheOn,
           hit: cacheHit,
           key: cacheOn ? cacheKey.slice(0, 16) : null,
-          entries: cacheOn ? cacheState.entries.length : 0,
+          entries: cacheOn ? rewriteCache.size(cacheMode) : 0,
         },
         messages,
         request: {

@@ -127,7 +127,8 @@ export function defaults() {
       // exact = 机制 1「整轮指纹缓存」：最终重写请求体逐字节相同时复用上次已验证结果。
       cache: {
         mode: 'none',
-        maxEntries: 4,
+        // 全局 LRU 上限；每个机制单独一个 data/rewrite-cache-<mode>.json
+        maxEntries: 1000,
         ttlDays: 7,
       },
     },
@@ -210,12 +211,15 @@ export class ConfigStore {
     // 保留玩家原有选择：enabled=true → exact，false → none；删掉旧键，避免双来源。
     const rwCache = user && typeof user === 'object' ? user.requestRewrite?.cache : null;
     if (rwCache && typeof rwCache === 'object') {
+      const legacyEnabled = 'enabled' in rwCache;
       if (typeof rwCache.mode !== 'string') {
         rwCache.mode = rwCache.enabled === false ? 'none' : 'exact';
         migrated = true;
       }
-      if ('enabled' in rwCache) {
+      if (legacyEnabled) {
         delete rwCache.enabled;
+        // 旧版逐 NPC 上限固定为 4；升级到全局 LRU 时回到新默认 1000。
+        if (rwCache.maxEntries === 4) rwCache.maxEntries = 1000;
         migrated = true;
       }
       if (!REWRITE_CACHE_MODES.includes(rwCache.mode)) {

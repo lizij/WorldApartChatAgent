@@ -5,6 +5,7 @@
 import { ConfigStore, DATA_DIR, PUBLIC_DIR, VERSION } from './config.js';
 import { Logger } from './log.js';
 import { createServer } from './server.js';
+import { rewriteCache } from './rewriteCache.js';
 
 export function createApp() {
   const config = new ConfigStore();
@@ -43,6 +44,10 @@ export function createApp() {
   }
 
   async function stop() {
+    // 重写缓存是防抖异步落盘，退出前同步刷一次，避免丢最后一段
+    try {
+      rewriteCache.flushSync();
+    } catch {}
     try {
       await logger.close();
     } catch {}

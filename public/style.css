@@ -81,6 +81,16 @@ textarea:focus { border-color: var(--accent); }
 .act-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
 .check.small { font-size: 12px; color: var(--muted); }
+/* 重写缓存机制：单选行，title 提供悬浮说明 */
+.cache-modes { display: flex; flex-direction: column; gap: 6px; }
+.cache-mode {
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 13px; color: var(--text); cursor: help;
+}
+.cache-mode:hover { border-color: var(--accent); }
+.cache-mode input { margin-top: 2px; cursor: pointer; }
+.cache-mode span { line-height: 1.4; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
 .muted { color: var(--muted); font-weight: normal; font-size: 12px; }
 .saved-hint { color: var(--green); font-size: 12px; align-self: center; }
