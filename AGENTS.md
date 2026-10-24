@@ -65,6 +65,10 @@
   **不要**为了压延迟而默认禁用思考：实测同一 system 下，禁用思考会让 NPC 忽略
   游戏在 system 里下发的复杂约束（世界观规则等），只按眼前一句话回复；开启思考才与裸模型一致。
   确需低延迟时再开 `upstream.disableThinking`。
+- **回复格式兜底**：游戏侧多为 `stream:false`。模型偶发违约——把整段游戏 JSON 又塞进 `content`（双层 JSON）、
+  `content` 里写了未转义的双引号、或输出被截断——这会让游戏把原始 JSON 当正文显示。
+  非流式回包会先做确定性修复（`src/replyRepair.js`）再返回，日志记 `reply_repaired`；
+  流式已逐字节发出，无法回改，只能记账。
 - **隔离**：请求间无状态，每个 NPC 独立 slug / sessionId / 数据目录，不存在会话串扰。
 - **外置设定提示词**：玩家可设**全局提示词**（对所有 NPC 生效）与**逐 NPC 个人提示词**
   （`data/npcs/<slug>/prompt.json = {useGlobal, text}`，兼容旧版 `style.json` 并自动迁移）。

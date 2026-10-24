@@ -38,6 +38,7 @@ import { MemoryRewriter } from './memory/rewriter.js';
 import { RequestRewriter, wrapPlainReply } from './requestRewrite.js';
 import { IdleFlusher } from './memory/idleFlusher.js';
 import { forwardUpstream, messageText, sendJsonError, tokenUsage } from './upstream.js';
+import { repairNpcReplyText } from './replyRepair.js';
 import { KeyedQueue } from './locks.js';
 import { planCast } from './cast/plan.js';
 import { buildActorMessages, callActor, sanitizeActorText } from './cast/actor.js';
@@ -1567,6 +1568,7 @@ export function createServer({ config, logger }) {
         injectorMode: castMode || 'head',
         filterAssistantText,
         wrapPlainContent,
+        repairReply: repairNpcReplyText,
       });
     } catch (err) {
       detail.error = err?.message || String(err);
@@ -1633,6 +1635,8 @@ export function createServer({ config, logger }) {
     // 非 JSON 回复：非流式会按当轮输出格式模板包回合法 JSON；流式只能记账
     if (plainWrapped) notes.push('reply_wrapped_json');
     else if (!parsedA.jsonOk) warnings.push('reply_not_json');
+    // 模型违约（双层 JSON / content 内裸引号 / 截断）已由本地修复
+    if (result.repaired) warnings.push('reply_repaired');
 
     const tokens = tokenUsage({
       usage: result.usage,

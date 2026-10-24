@@ -172,6 +172,7 @@ export async function forwardUpstream(
     injectorMode = 'head',
     filterAssistantText = null,
     wrapPlainContent = null,
+    repairReply = null,
   } = {},
 ) {
   const up = config.upstream;
@@ -242,6 +243,7 @@ export async function forwardUpstream(
     let contentTtftMs = null;
     let headersFlushed = !delayHeaders;
     let injected = false;
+    let repaired = false;
     const markFirst = () => {
       if (ttftMs == null) {
         ttftMs = Date.now() - started;
@@ -309,6 +311,15 @@ export async function forwardUpstream(
       const msg = parsed?.choices?.[0]?.message;
       if (msg && typeof msg.content === 'string') {
         let content = msg.content;
+        // 非流式：先修复模型违约的回复（双层 JSON / content 内裸引号 / 截断），
+        // 否则游戏端会把原始 JSON 当正文显示。
+        if (typeof repairReply === 'function') {
+          const fixed = repairReply(content);
+          if (typeof fixed === 'string' && fixed && fixed !== content) {
+            content = fixed;
+            repaired = true;
+          }
+        }
         // 非流式：可先做确定性清理（例如剥掉 A 替配角写的台词），再注入/兜底包装。
         if (typeof filterAssistantText === 'function') {
           const filtered = filterAssistantText(content);
@@ -358,6 +369,7 @@ export async function forwardUpstream(
       contentTtftMs,
       durationMs: Date.now() - started,
       injected,
+      repaired,
     };
   } catch (err) {
     if (idleTimer) clearTimeout(idleTimer);
