@@ -7,3 +7,6 @@ data_test/
 dist/
 releases/
 .tmp-shape/
+
+# Steam 工坊：整个目录不入库（介绍、预览图、产物与上传状态均留在本地）
+workshop/
