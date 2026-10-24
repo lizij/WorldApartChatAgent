@@ -25,7 +25,7 @@
 | `multiNpc.speakPolicy/outputStyle/allowASilence` | 配角开口策略 `addressed/always` / 多人输出格式 `script/inherit` / 允许主角只给在旁反应 |
 | `multiNpc.coStarWritesMemory` | 配角是否写入自己的长期记忆（默认 `false`） |
 | `multiNpc.autoStage` | **是否允许按台词自动进场/离场**（默认 `false`）。关闭时只认 `/invite`、`/add`、`/leave`、`/remove`，台词只作叙事事实；开启后才按括号动作/直呼其名调度 |
-| `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务/话题轮**退化单人戏（普通闲聊的 `## 任务：闲聊` 不算）/ 超时清场（默认 **120 分钟**，管理页按分钟填写） |
+| `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务轮**退化单人戏（`## 任务：X` 的标题既不是“闲聊”也不是“话题闲聊”时才算；`本次话题`/`收尾判定` 属于话题闲聊，不退化）/ 超时清场（默认 **120 分钟**，管理页按分钟填写） |
 | `multiNpc.actorTailWaitMs/actorMaxTokens/actorTimeoutMs` | 主角先说完时等待配角的上限（3s）/ 配角输出上限（300 tokens）/ 配角调用超时（20s） |
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
