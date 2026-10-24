@@ -128,8 +128,14 @@ export function planCast({ info, cfg, aMemoryText = '' } = {}) {
 
   const current = next.stage.onStage[0];
   if (!current) return { ...base, skip: 'no_costar' };
-  // 有配角在场时才谈“退化”；没有配角时上一行已经按普通单人轮返回了
-  if (realTask) return { ...base, skip: 'task' };
+  // 有配角在场时才谈“退化”；没有配角时上一行已经按普通单人轮返回了。
+  // 但玩家**显式**请她进场（/invite、/add）或直接对她说话时，不该被任务轮吞掉——
+  // 否则「/invite 江楚弦」会显示“进了场”，她却整段话题都不开口。
+  const inviteB = (directives.commands || []).some(
+    (c) => c.action === 'invite' && resolveCoStar(c.name) === current.slug,
+  );
+  const explicitB = addrB.length > 0 || inviteB;
+  if (realTask && !explicitB) return { ...base, skip: 'task' };
 
   const card = buildCard(current.slug);
   if (!card) return { ...base, skip: 'no_card' };
