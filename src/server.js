@@ -16,6 +16,8 @@ import {
   VERSION,
   REWRITE_CACHE_MODES,
   upstreamChatUrl,
+  effectiveMemoryChars,
+  effectiveInjectChars,
 } from './config.js';
 import { classify } from './identify.js';
 import {
@@ -450,6 +452,11 @@ export function createServer({ config, logger }) {
         requestRewrite: c.requestRewrite,
         multiNpc: c.multiNpc,
         log: c.log,
+        // 派生上限：maxMemoryChars 受 maxTokens 物理约束，供管理页做交叉校验提示
+        limits: {
+          memoryEffectiveChars: effectiveMemoryChars(c),
+          injectEffectiveChars: effectiveInjectChars(c),
+        },
       }),
     );
   }
@@ -1062,7 +1069,7 @@ export function createServer({ config, logger }) {
     if (castOn) {
       try {
         const aMemory0 = memEnabled
-          ? loadMemory(path.join(NPCS_DIR, info.slug, 'memory.md'), c.memory.injectMaxChars)
+          ? loadMemory(path.join(NPCS_DIR, info.slug, 'memory.md'), effectiveInjectChars(c))
           : '';
         cast = planCast({
           info,
@@ -1228,7 +1235,7 @@ export function createServer({ config, logger }) {
         memoryText = buildMemoryText({
           memoryFile: path.join(NPCS_DIR, info.slug, 'memory.md'),
           state: aState0,
-          maxChars: c.memory.injectMaxChars,
+          maxChars: effectiveInjectChars(c),
         });
       }
       if (c.prompts.enabled) {
@@ -1374,7 +1381,7 @@ export function createServer({ config, logger }) {
         memoryText = buildMemoryText({
           memoryFile: bundle.memoryFile,
           state: bundle.state,
-          maxChars: c.memory.injectMaxChars,
+          maxChars: effectiveInjectChars(c),
         });
       }
 

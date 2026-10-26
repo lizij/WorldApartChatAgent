@@ -10,11 +10,11 @@
 | `upstream.disableThinking` | 默认 `false`：**不干涉上游思考**，与游戏裸模型行为一致。设为 `true` 才会补 `thinking:{type:"disabled"}`（更低延迟，但会削弱对复杂 system 规则的遵从）；无论开关如何，调用方显式带 `thinking` 时都不覆盖 |
 | `upstream.includeUsage` | 默认 `false`：流式请求不主动注入 `stream_options.include_usage`，避免多出的 `choices: []` 汇总 chunk 影响游戏端解析。开启后每轮可拿到精确 token 总数（执行日志仍只显示总数）；关闭时按字符估算并标 `≈` |
 | `memory.enabled` | 记忆总开关；关闭等同纯透传 |
-| `memory.injectMaxChars` | 注入长期记忆字符上限（默认 3200，与 `maxMemoryChars` 留有余量；超出则保留最新部分、丢弃较早内容） |
+| `memory.injectMaxChars` | 注入长期记忆字符上限（默认 5600，= 记忆上限 + 200；比上限小会出现「写得进、注入不到」）。超出时**按分区优先级裁剪**：【赠予往来】→【同场】→【习惯与忌讳】→【经历与进度】→【未了之事】→【关系】→【身份与称呼】，身份与关系最后才动；裁剪只影响注入，不改磁盘文件 |
 | `memory.snapshotSystem` | system 内容变化时存档原文 |
 | `memory.summarizer.everyTurns` | 每多少轮异步压缩一次（默认 4） |
 | `memory.summarizer.idleFlushEnabled/idleFlushMs` | 空闲兜底：默认开；`idleFlushMs` 默认 5 分钟无请求即视为本段会话结束并补压（扫描周期固定 5 秒，不做配置项以免"改了不生效"） |
-| `memory.summarizer.recentEntries/maxMemoryChars/maxTokens/timeoutMs/overLimitRetries` | 喂给摘要器的近期对话条数（40）/ 记忆字数上限（3000）/ 摘要调用 max_tokens（2500）/ 超时（90s）/ 超限重试次数（2，0~3） |
+| `memory.summarizer.recentEntries/maxMemoryChars/maxTokens/timeoutMs/overLimitRetries` | 单次最多消费的新对话条数（默认 60，**摘要窗口已按行号水位切片**，这只是异常保护上限）/ 记忆字数上限（5000）/ 摘要调用 max_tokens（4000）/ 超时（120s）/ 超限重试次数（2，0~3） |
 | `prompts.enabled` | 外置设定提示词总开关（默认 `true`）；关闭后全局与逐 NPC 提示都不注入 |
 | `prompts.global` | 全局提示词（对所有 NPC 生效，留空不注入；上限 4000 字）。逐 NPC 个人提示与「是否叠加全局」存于 `data/npcs/<slug>/prompt.json`。旧键 `style` 会在启动时自动迁移为 `prompts` |
 | `requestRewrite.enabled` | **实验性**请求重写总开关（默认 `false`）。每轮 NPC 对话额外调用一次上游，逐条改写**全部**游戏 system 模块；额外 token 消耗与首字延迟明显增加 |
@@ -30,4 +30,9 @@
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
 > 故有效上限 ≈ `maxTokens × 1.4`。上限若超过这个值，模型物理上写不出那么长——
-> **调大 `maxMemoryChars` 不会让记忆变长**，只会让每次摘要都触发截断。默认 3000 / 2500 是匹配的。
+> **调大 `maxMemoryChars` 不会让记忆变长**，只会让每次摘要都触发截断。默认 5000 / 4000 是匹配的
+> （4000 × 1.4 = 5600，留有余量）。
+>
+> 程序会在运行时取 `min(maxMemoryChars, floor(maxTokens × 1.4))` 作为真实上限，
+> 并把 `injectMaxChars` 抬到至少「真实上限 + 200」；管理页在两者不匹配时显示黄字提示。
+> 配置加载时还会**只把仍是老默认值的项**升级到新默认（见上表），玩家自定义过的值不会被改。

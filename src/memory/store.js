@@ -61,6 +61,9 @@ export function openNpc(slug, info = {}) {
       lastSeen: now,
       turns: 0,
       lastSummaryTurn: 0,
+      // 摘要窗口水位：conversations.jsonl 里已消费到第几条（非空行）。
+      // 老档案没有这个字段 → 首次摘要沿用旧窗口，之后自动接管。
+      lastSummaryLine: 0,
       systemHash: null,
       lastGame: null,
     };
@@ -108,7 +111,126 @@ export function saveState(stateFile, state) {
   fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf8');
 }
 
-/** 读长期记忆正文（去掉标题行），按最大字符数截取最新部分。 */
+/**
+ * 记忆分区（顺序固定）。这是「状态卡」的骨架：
+ * 前两区是底座（不轻易裁剪），中间两区是编号故事行，最后三区是清单。
+ */
+export const MEMORY_SECTIONS = [
+  '【身份与称呼】',
+  '【关系】',
+  '【经历与进度】',
+  '【未了之事】',
+  '【赠予往来】',
+  '【习惯与忌讳】',
+  '【同场】',
+];
+
+/**
+ * 记忆分区裁剪顺序：超预算时从前往后处理（先整段丢，丢不划算就软裁剪该段）。
+ * 先牺牲细节与大段进度，保住「她是谁、跟他什么关系、还欠着什么」。
+ */
+const SECTION_DROP_ORDER = [
+  '【赠予往来】',
+  '【同场】',
+  '【习惯与忌讳】',
+  '【经历与进度】',
+  '【未了之事】',
+  '【当前关系】',
+  '【关系】',
+  '【身份与称呼】',
+];
+
+/** 把记忆正文拆成「前导 + 各分区」；标题行必须是独占一行的【…】。 */
+function splitMemorySections(body) {
+  const out = [];
+  let cur = { title: null, lines: [] };
+  for (const line of String(body || '').split('\n')) {
+    const m = /^【[^】]+】\s*$/.exec(line.trim());
+    if (m) {
+      out.push(cur);
+      cur = { title: m[0], lines: [] };
+    } else {
+      cur.lines.push(line);
+    }
+  }
+  out.push(cur);
+  return out.filter((s) => s.title || s.lines.some((l) => l.trim()));
+}
+
+function renderMemorySections(sections) {
+  return sections
+    .map((s) => (s.title ? [s.title, ...s.lines].join('\n') : s.lines.join('\n')))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * 按分区优先级把记忆压到 maxChars 以内：
+ * 低优先级分区先「整段丢」，丢不动（或丢它太浪费）就「软裁剪」它自己的正文，
+ * 身份与关系永远最后才动；连底座都放不下时才退化为「保留开头 60% + 结尾 40%」。
+ */
+function trimMemorySections(body, maxChars) {
+  const sections = splitMemorySections(body);
+  const dropped = [];
+  const clipped = [];
+  const size = () => renderMemorySections(sections).length;
+  if (size() <= maxChars) return body;
+
+  for (const name of SECTION_DROP_ORDER) {
+    if (size() <= maxChars) break;
+    const idx = sections.findIndex((s) => s.title === name);
+    if (idx < 0) continue;
+    const sec = sections[idx];
+    const over = size() - maxChars;
+    const bodyLen = sec.lines.join('\n').trim().length;
+    // 这一段的正文比「必须砍掉的量」还小 → 整段丢更划算；否则只砍正文尾部够用的部分
+    if (bodyLen > over + 20) {
+      if (clipSectionBody(sec, bodyLen - over - 20)) clipped.push(name);
+    } else {
+      sections.splice(idx, 1);
+      dropped.push(name);
+    }
+  }
+
+  let text = renderMemorySections(sections);
+  const notes = [];
+  if (dropped.length) notes.push(`本次未注入：${dropped.join('、')}`);
+  if (clipped.length) notes.push(`已截短：${clipped.join('、')}`);
+  if (notes.length) text += `\n（${notes.join('；')}）`;
+
+  if (text.length <= maxChars) return text;
+
+  // 底座本身超限：保留首尾，切在句末
+  const mark = '\n……（中间内容已省略）\n';
+  const budget = Math.max(100, maxChars - mark.length);
+  const head = Math.floor(budget * 0.6);
+  const tail = budget - head;
+  let h = text.slice(0, head);
+  const k = Math.max(h.lastIndexOf('。'), h.lastIndexOf('\n'));
+  if (k > head * 0.5) h = h.slice(0, k + 1);
+  return h + mark + text.slice(text.length - tail);
+}
+
+/** 把某分区正文压到 maxBodyChars 以内（保留开头 60% + 结尾 40%，按行边界切）；返回是否有改动。 */
+function clipSectionBody(section, maxBodyChars) {
+  const bodyText = section.lines.join('\n').trim();
+  if (bodyText.length <= maxBodyChars) return false;
+  const mark = '…（中间略）…';
+  const budget = Math.max(60, maxBodyChars - mark.length);
+  const headLen = Math.floor(budget * 0.6);
+  const tailLen = budget - headLen;
+  let head = bodyText.slice(0, headLen);
+  const nlH = head.lastIndexOf('\n');
+  if (nlH > head.length * 0.5) head = head.slice(0, nlH);
+  let tail = bodyText.slice(bodyText.length - tailLen);
+  const nlT = tail.indexOf('\n');
+  if (nlT >= 0 && nlT < tail.length * 0.5) tail = tail.slice(nlT + 1);
+  section.lines = ['', head, mark, tail];
+  return true;
+}
+
+/** 读长期记忆正文（去掉标题行），超预算时按分区优先级裁剪后注入。 */
 export function loadMemory(memoryFile, maxChars) {
   let text;
   try {
@@ -122,7 +244,7 @@ export function loadMemory(memoryFile, maxChars) {
     .join('\n')
     .trim();
   if (!maxChars || body.length <= maxChars) return body;
-  return '…（更早记忆已省略）\n' + body.slice(body.length - maxChars);
+  return trimMemorySections(body, maxChars);
 }
 
 export function writeMemory(memoryFile, slug, body) {
@@ -211,4 +333,33 @@ export function recentConversations(convFile, limit) {
     } catch {}
   }
   return out;
+}
+
+/**
+ * 按「行号水位」读未消费的对话：只取 lineOffset 之后、最多 maxEntries 条。
+ * 解决 old：按「最近 N 条」取窗口会在每 everyTurns 轮重复喂同一段对话（重复摘要 → 流水账膨胀）。
+ *
+ * 行号按「非空行」计（对话记录都是单行 JSON，空行会被过滤），因此水位稳定、可持久化到 state.lastSummaryLine。
+ * @returns {{entries: object[], consumed: number, totalLines: number}}
+ */
+export function conversationsAfter(convFile, lineOffset = 0, maxEntries = 0) {
+  let lines = [];
+  try {
+    lines = fs
+      .readFileSync(convFile, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim());
+  } catch {
+    return { entries: [], consumed: 0, totalLines: 0 };
+  }
+  const start = Math.max(0, Math.min(Number(lineOffset) || 0, lines.length));
+  const rest = lines.slice(start);
+  const slice = maxEntries > 0 ? rest.slice(0, maxEntries) : rest;
+  const entries = [];
+  for (const line of slice) {
+    try {
+      entries.push(JSON.parse(line));
+    } catch {}
+  }
+  return { entries, consumed: slice.length, totalLines: lines.length };
 }

@@ -84,21 +84,22 @@ export function defaults() {
     },
     memory: {
       enabled: true,
-      // 注入给模型的长期记忆最大字符数（超出保留最新部分）。
+      // 注入给模型的长期记忆最大字符数（超出按分区优先级裁剪，身份/关系最后才动）。
       // 须 ≥ maxMemoryChars + 包装说明，否则记忆里较早的部分永远注入不到模型。
-      injectMaxChars: 3200,
+      injectMaxChars: 5600,
       // 首次见到 / system 内容变化时存档完整原文
       snapshotSystem: true,
       summarizer: {
         // 回复结束后异步压缩长期记忆（不阻塞游戏响应）
         enabled: true,
         everyTurns: 4,
-        recentEntries: 40,
+        // 单次最多喂多少条新对话（摘要窗口已按行号水位切片，这里只是异常保护上限）
+        recentEntries: 60,
         // 记忆体量：实测中文约 1.4 汉字/token，故 maxMemoryChars 必须与 maxTokens 匹配，
         // 否则模型物理上写不到那么长 → 每次都触发截断（调大 maxMemoryChars 不会让记忆变长）。
-        maxMemoryChars: 3000, // 上限 = maxTokens × 1.4（此处 2500×1.4=3500，留有余量）
-        maxTokens: 2500,
-        timeoutMs: 90000,
+        maxMemoryChars: 5000, // 上限 = maxTokens × 1.4（此处 4000×1.4=5600，留有余量）
+        maxTokens: 4000,
+        timeoutMs: 120000,
         // 超限重试：实测 prompt 里的字数要求几乎不被遵守，而模型有能力写短；
         // 超限时把上一次输出回喂、要求压到上限内，最多重试这么多次，仍超限才机械截断。
         overLimitRetries: 2, // 0~3
@@ -182,6 +183,83 @@ export function deepMerge(base, override) {
   return out;
 }
 
+// 实测中文约 1.4 汉字/token：记忆写多长受 maxTokens 物理限制，调大 maxMemoryChars 不会变长。
+export const CHARS_PER_TOKEN = 1.4;
+
+/**
+ * 记忆「真正能写出来」的上限：受 maxMemoryChars 与 maxTokens 共同约束。
+ * 例：maxMemoryChars=5000 但 maxTokens=2500，实际只能写约 3500 字。
+ */
+export function effectiveMemoryChars(cfg) {
+  const s = cfg?.memory?.summarizer || {};
+  const chars = Number(s.maxMemoryChars) || 0;
+  const tokens = Number(s.maxTokens) || 0;
+  const byTokens = tokens > 0 ? Math.floor(tokens * CHARS_PER_TOKEN) : 0;
+  if (chars > 0 && byTokens > 0) return Math.min(chars, byTokens);
+  return chars || byTokens || 0;
+}
+
+/** 注入预算：至少覆盖「能写出来的上限 + 包装说明」，否则写得进、注入不到。 */
+export function effectiveInjectChars(cfg) {
+  const target = effectiveMemoryChars(cfg);
+  const configured = Number(cfg?.memory?.injectMaxChars) || 0;
+  if (!target) return configured;
+  const need = target + 200;
+  return configured > 0 ? Math.max(configured, need) : need;
+}
+
+// 老默认值 → 新默认值：只替换「玩家没动过」的项，避免覆盖自定义。
+const LEGACY_MEMORY_DEFAULTS = [
+  ['memory.injectMaxChars', 3200, 5600],
+  ['memory.summarizer.maxMemoryChars', 3000, 5000],
+  ['memory.summarizer.maxTokens', 2500, 4000],
+  ['memory.summarizer.timeoutMs', 90000, 120000],
+  ['memory.summarizer.recentEntries', 40, 60],
+];
+
+function pick(obj, dotted) {
+  return dotted.split('.').reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj);
+}
+
+function assign(obj, dotted, value) {
+  const keys = dotted.split('.');
+  const last = keys.pop();
+  const target = keys.reduce((o, k) => (o && typeof o === 'object' ? o[k] : undefined), obj);
+  if (target && typeof target === 'object') target[last] = value;
+}
+
+/** 老默认值一次性升级（没动过的项才升），再加「写得出来 / 注入得到」的守卫。 */
+function normalizeMemory(cfg) {
+  let changed = false;
+  for (const [path, oldVal, newVal] of LEGACY_MEMORY_DEFAULTS) {
+    if (pick(cfg, path) === oldVal) {
+      assign(cfg, path, newVal);
+      changed = true;
+    }
+  }
+  const s = cfg?.memory?.summarizer;
+  if (s && typeof s === 'object') {
+    const chars = Number(s.maxMemoryChars) || 0;
+    const tokens = Number(s.maxTokens) || 0;
+    if (chars > 0 && tokens > 0) {
+      const need = Math.ceil(chars / CHARS_PER_TOKEN);
+      if (tokens < need) {
+        s.maxTokens = Math.min(8000, need);
+        changed = true;
+      }
+    }
+  }
+  if (cfg?.memory && typeof cfg.memory === 'object') {
+    const target = effectiveMemoryChars(cfg);
+    const inject = Number(cfg.memory.injectMaxChars) || 0;
+    if (target > 0 && inject < target + 200) {
+      cfg.memory.injectMaxChars = target + 200;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 /**
  * 配置仓库：启动时加载/生成，运行期可热更新（管理页保存后即时生效）。
  */
@@ -229,6 +307,7 @@ export class ConfigStore {
     }
 
     this.cfg = deepMerge(d, user);
+    if (normalizeMemory(this.cfg)) migrated = true;
     this.firstRun = !existed;
     if (!existed || migrated) this.persist();
   }
@@ -240,6 +319,7 @@ export class ConfigStore {
   /** 局部更新（深合并到对应段）并落盘；返回更新后的完整配置。 */
   update(patch) {
     this.cfg = deepMerge(this.cfg, patch);
+    normalizeMemory(this.cfg);
     this.persist();
     return this.cfg;
   }

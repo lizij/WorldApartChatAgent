@@ -51,6 +51,29 @@ function updateCacheModeHint() {
   hint.textContent = (CACHE_MODE_OPTIONS.find((x) => x.value === mode) || {}).desc || '';
 }
 
+/**
+ * 记忆上限交叉校验提示：maxMemoryChars 受 maxTokens 物理约束（中文约 1.4 汉字/token），
+ * 而注入预算必须 ≥ 上限，否则写得进、注入不到。
+ */
+function renderMemoryLimitHint(c) {
+  const el = $('#memLimitHint');
+  if (!el) return;
+  const s = c?.memory?.summarizer || {};
+  const configured = Number(s.maxMemoryChars) || 0;
+  const maxTokens = Number(s.maxTokens) || 0;
+  const effective = Number(c?.limits?.memoryEffectiveChars) || configured;
+  const inject = Number(c?.limits?.injectEffectiveChars) || Number(c?.memory?.injectMaxChars) || 0;
+  if (configured > 0 && effective > 0 && effective < configured) {
+    el.textContent =
+      `⚠ maxTokens（${maxTokens}）最多只写得动约 ${effective} 字，你填的 ${configured} 字超出部分写不出来。` +
+      `请把 maxTokens 提到 ${Math.ceil(configured / 1.4)} 以上。`;
+    el.className = 'hint warn';
+    return;
+  }
+  el.textContent = `当前：记忆上限 ${configured} 字，注入预算 ${inject} 字（须 ≥ 上限，否则写得进、注入不到）。`;
+  el.className = 'hint';
+}
+
 /** 渲染单选行；每项 title 提供鼠标悬浮说明，选中项说明同时显示在下方。 */
 function renderCacheModes(selected = 'none') {
   const host = $('#rwCacheModes');
@@ -93,6 +116,7 @@ async function loadConfig() {
   $('#memInjectChars').value = c.memory.injectMaxChars;
   $('#sumEvery').value = c.memory.summarizer.everyTurns;
   $('#sumMaxChars').value = c.memory.summarizer.maxMemoryChars;
+  renderMemoryLimitHint(c);
   $('#promptsEnabled').checked = !!c.prompts?.enabled;
   $('#promptsGlobal').value = c.prompts?.global || '';
   const rw = c.requestRewrite || {};
@@ -152,6 +176,7 @@ $('#saveMemory').addEventListener('click', async () => {
     }),
   });
   flashSaved('memSaved', '记忆设置已保存');
+  loadConfig();
 });
 
 $('#savePrompts').addEventListener('click', async () => {
