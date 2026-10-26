@@ -4,12 +4,20 @@
  * 失败只记日志、不影响游戏。产出整体重写该 NPC 的 memory.md。
  */
 import fs from 'node:fs';
-import { upstreamChatUrl, effectiveMemoryChars } from '../config.js';
+import { upstreamChatUrl, effectiveMemoryChars, CHARS_PER_TOKEN } from '../config.js';
 import { sumUsageTotals, tokenUsage, usageTotal } from '../upstream.js';
-import { recentConversations, conversationsAfter, writeMemory, saveState, loadMemory, MEMORY_SECTIONS } from './store.js';
+import {
+  recentConversations,
+  conversationsAfter,
+  writeMemory,
+  saveState,
+  loadMemory,
+  MEMORY_SECTIONS,
+  fitMemorySections,
+} from './store.js';
 
-/** 摘要器 system prompt；limit 用于把字数上限写进正文。 */
-function systemPrompt(limit) {
+/** 摘要器 system prompt；softChars 是给模型的目标字数，hardChars 是绝不允许超过的硬上限。 */
+function systemPrompt(softChars, hardChars) {
   return [
     '你是对话记忆压缩器，只为某一个游戏 NPC 维护长期记忆。',
     '你的产物是一份【状态卡】：让该 NPC 日后只看这份记忆，就能立刻想起',
@@ -28,9 +36,13 @@ function systemPrompt(limit) {
     '6. 只写仍然影响当下的内容；已经了结、且对现在没有影响的过程（例如已经过去的一段亲密过程、路上歇了几次）不写。',
     '7. 同一件事只写一条；后来有变化就直接改那一条，不要另起一条重复它。',
     '8. 可以引用短称呼、口头禅、关键短句（如“我喊慢你就慢”），但不要整段照抄台词。',
-    `9. 细节要写足：能落到具体做法、具体进度、具体约定就写具体，不要笼统概括。总字数上限 ${limit} 字。`,
-    '10. 【已有记忆】里的内容，只要还没有“了结到对现在毫无影响”，就必须保留；可以改写法、合并同类，',
-    '    但不许因为重写就把信息丢掉。',
+    `9. 细节要写足：能落到具体做法、具体进度、具体约定就写具体，不要笼统概括。`,
+    `   字数控制在 ${softChars} 字左右，绝对不要超过 ${hardChars} 字。`,
+    '   超出会挤掉后面的分区，宁可少写一条细节，也要留出余量。',
+    '10. 【已有记忆】里的内容要尽量保留，但**字数优先**：',
+    `    如果【已有记忆】本身就已经超过 ${softChars} 字，请先精简它——合并同类条目、`,
+    '    把多条压缩成一条、删掉已了结的细节与修饰语，然后再并入新内容。',
+    '    允许为了字数把旧条目压缩或合并；只有【身份与称呼】【关系】【未了之事】里的关键事实不许删。',
     '11. 承诺、期限、分步计划必须逐条写清，不许合成一句空话：',
     '    - 期限要写原文里的期限（例如“少说一年”“每月验一回”“七天一回”），不要改写成“以后”“慢慢来”；',
     '    - 分步计划按步骤逐条列（本月做什么 / 下月做什么 / 再往后做什么）；',
@@ -73,19 +85,30 @@ function systemPrompt(limit) {
   ].join('\n');
 }
 
-/** 超限重试时用的「压缩指令」：把上一次的超长输出回喂，明确要求砍到上限内。 */
-function compressPrompt(slug, prev, limit, attempt) {
+/**
+ * 超限重试用的「压缩指令」：把上一次的超长输出回喂，要求砍到目标字数以内。
+ *
+ * 关键：不能只让它「删修饰语」——实测那样每次都只减十几字，压不下来。
+ * 必须明确允许它合并条目、删掉低优先级分区的整节内容，只死保【身份与称呼】【关系】。
+ */
+function compressPrompt(slug, prev, target, hardLimit, attempt) {
+  const need = Math.max(0, prev.length - target);
   return [
     `NPC：${slug}`,
-    `你上一次输出有 ${prev.length} 字，超过硬性上限 ${limit} 字，不合格（第 ${attempt} 次压缩）。`,
-    `请压缩到 ${limit} 字以内后，重新输出完整记忆正文，并保持这 7 个分区标题与顺序：`,
+    `你上一次输出有 ${prev.length} 字，超过硬性上限 ${hardLimit} 字，不合格（第 ${attempt} 次压缩）。`,
+    `必须砍到 ${target} 字以内 —— 至少要减掉 ${need} 字，这是硬性要求，不是建议。`,
+    '输出完整记忆正文，保持这 7 个分区标题与顺序（分区内容可以写“（无）”，但标题不能少）：',
     MEMORY_SECTIONS.join(''),
-    '压缩原则：7 个分区都不得整节删除，只压缩每一条的字数；',
-    '优先删减已了结的过程细节与修饰语，最高优先级是【未了之事】与【关系】；',
+    '',
+    '压缩手法（按顺序用，直到达到目标字数）：',
+    '1. 合并同类条目：同一件事、同一段关系的多条，合成一条，只留结论。',
+    '2. 删掉已经了结、且对现在没有影响的过程细节。',
+    '3. 大幅精简【经历与进度】【赠予往来】【同场】：每类只留当前最相关的几条。',
+    '4. 再精简【习惯与忌讳】与【未了之事】：只留最常用的几条。',
+    '【身份与称呼】【关系】必须完整保留，一条都不能少。',
     '【经历与进度】【未了之事】保留 1. 2. 3. 编号，一条一行；其余分区一行一句。',
-    '合并同一件事，去掉重复表述。',
     '不得新增材料里没有的事实；仍然一条写一件事，不要退回成整段流水账。',
-    '只输出压缩后的记忆正文，不要任何解释。',
+    '只输出压缩后的记忆正文，不要任何解释、不要说明你删了什么。',
     '',
     '【你上一次的输出】',
     prev,
@@ -140,7 +163,7 @@ export class Summarizer {
    * 且它在 max_tokens 受限下工作，开启思考会把额度耗在 reasoning 上导致摘要为空
    * （摘要失败 = 记忆不再更新）。这是内部任务的设计选择，不暴露为配置项。
    */
-  async #call(messages) {
+  async #call(messages, maxTokensOverride) {
     const cfg = this.config.memory.summarizer;
     const up = this.config.upstream;
     if (up.insecureTLS) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -153,7 +176,7 @@ export class Summarizer {
         body: JSON.stringify({
           model: up.model,
           temperature: 0.3,
-          max_tokens: cfg.maxTokens,
+          max_tokens: maxTokensOverride || cfg.maxTokens,
           stream: false,
           thinking: { type: 'disabled' },
           messages,
@@ -179,7 +202,9 @@ export class Summarizer {
     const up = this.config.upstream;
     // 真正能写出来的上限：受 maxMemoryChars 与 maxTokens 共同约束
     const limit = effectiveMemoryChars(this.config);
-    const sysPrompt = systemPrompt(limit);
+    // 软目标 = 硬上限的 96%：实测模型会把「目标」当成下限再往上溢，留 4% 余量。
+    const softTarget = limit > 0 ? Math.floor(limit * 0.96) : 0;
+    const sysPrompt = systemPrompt(softTarget, limit);
     try {
       const oldMemory = loadMemory(bundle.memoryFile, 100000);
       // 摘要窗口按「行号水位」切片：只喂上次摘要之后的新对话。
@@ -262,17 +287,23 @@ export class Summarizer {
         `【新增对话】\n${dialogue || '（无）'}`;
 
       const usageList = [];
+      // 输出 token 预算：模型会把 max_tokens 用满，若刚好卡在目标字数上下，
+      // 会出现 finish=length 把正文从中间切断。这里按「硬上限 ×1.15」倒推，保证它能自然写完，
+      // 再由 fitMemorySections 在行边界上收进上限。
+      const callMaxTokens = Math.max(
+        Number(cfg.maxTokens) || 0,
+        Math.ceil((limit * 1.15) / CHARS_PER_TOKEN) || 0,
+      );
       const first = await this.#call([
         { role: 'system', content: sysPrompt },
         { role: 'user', content: userContent },
-      ]);
+      ], callMaxTokens);
       usageList.push(first.usage);
 
-      // 超限重试：实测 prompt 里的「字数上限」几乎不被遵守（超 277~353 字），
-      // 而模型本身有能力写短——把上一次输出回喂、明确要求砍到上限内，
-      // 比事后机械截断更靠谱（截断会稳定切掉同一位置之后的内容）。
-      // 目标取上限的 90%，给模型的自然超出留一点余量。
-      const retryTarget = limit > 0 ? Math.max(1, Math.floor(limit * 0.9)) : 0;
+      // 超限重试：prompt 里的字数上限几乎不被遵守（实测自然产出 5010~5239，上限 5000）；
+      // 把上一次输出回喂、明确要求砍到软目标以内，比事后机械截断更靠谱。
+      // 重试目标 = 软目标再降 4%，给模型留出「减不够」的余量。
+      const retryTarget = softTarget > 0 ? Math.max(1, Math.floor(softTarget * 0.96)) : 0;
       const maxRetries = Math.max(0, Math.min(3, Number(cfg.overLimitRetries) || 0));
       let text = first.text;
       let retries = 0;
@@ -280,22 +311,26 @@ export class Summarizer {
         retries += 1;
         const shrunk = await this.#call([
           { role: 'system', content: sysPrompt },
-          { role: 'user', content: compressPrompt(slug, text, retryTarget, retries) },
-        ]);
+          { role: 'user', content: compressPrompt(slug, text, retryTarget, limit, retries) },
+        ], callMaxTokens);
         usageList.push(shrunk.usage);
-        if (shrunk.text.length >= text.length) break; // 没压下去就别再试，交给截断兜底
+        // 只要真的变短了就继续；变短幅度太小也算失败（模型没按压缩要求走），直接交给兜底
+        if (shrunk.text.length >= text.length - 40) break;
         text = shrunk.text;
       }
 
-      // 兜底：重试用尽后仍超限，按行边界截断（尽量不切断一句话）
+      // 兜底：重试用尽后仍超限，按分区预算「压扁」（七个分区都保留，只在行边界裁）。
+      // 不用「砍尾」：砍尾会把【同场】【习惯与忌讳】整段丢掉，而它们对演出仍有用。
+      // 稳态下（记忆长期贴着上限）模型每轮会多写 100~200 字，这里的压缩属于正常预算，
+      // 只有砍掉比例较大（>8%）才当作「真的丢内容」记警告。
       let final = text;
       const preTruncateChars = text.length;
       let truncated = false;
+      let trimmedRatio = 0;
       if (limit > 0 && final.length > limit) {
-        const cut = final.slice(0, limit);
-        const nl = cut.lastIndexOf('\n');
-        final = nl >= limit * 0.5 ? cut.slice(0, nl) : cut;
+        final = fitMemorySections(text, limit);
         truncated = true;
+        trimmedRatio = preTruncateChars > 0 ? (preTruncateChars - final.length) / preTruncateChars : 0;
       }
       writeMemory(bundle.memoryFile, slug, final);
       // 重新读状态，避免覆盖期间的变化（state.json 很小）
@@ -339,6 +374,8 @@ export class Summarizer {
           reason,
           retries,
           truncated,
+          fitted: truncated && trimmedRatio <= 0.08,
+          trimmedRatio: Number(trimmedRatio.toFixed(4)),
           calls: usageList.length,
           generatedChars: first.text.length,
           preTruncateChars,
@@ -360,8 +397,11 @@ export class Summarizer {
           preTruncateChars,
           retries,
           truncated,
+          fitted: truncated && trimmedRatio <= 0.08,
+          trimmedRatio: Number(trimmedRatio.toFixed(4)),
           dialogueEntries: recent.length,
-          warnings: truncated ? [`memory_over_limit:${preTruncateChars}>${limit}`] : [],
+          // 小幅压缩是稳态下的正常预算（记忆长期贴着上限），只有砍掉 >8% 才算真丢内容
+          warnings: trimmedRatio > 0.08 ? [`memory_over_limit:${preTruncateChars}>${limit}`] : [],
           tokens,
         },
         detail,

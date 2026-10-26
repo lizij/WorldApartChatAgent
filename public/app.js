@@ -432,7 +432,9 @@ function warningLabel(w) {
   switch (head) {
     case 'memory_over_limit': {
       const m = /^(\d+)>(\d+)$/.exec(rest.join(':'));
-      return m ? `记忆 ${m[1]} 字超出上限 ${m[2]} 字，已截断` : '记忆超出上限，已截断';
+      return m
+        ? `记忆 ${m[1]} 字超过上限 ${m[2]} 字，已按板块裁剪较多，可能丢内容`
+        : '记忆超过上限，已按板块裁剪较多';
     }
     case 'cast_stage_cleared':
       return rest[0] === 'scene'
@@ -845,8 +847,12 @@ function renderLog(rec) {
       body = `<div class="log-meta">${esc(rec.modelIn || '')} → ${esc(rec.modelOut || '')} ${tokenTag(rec)} ${timing.map((x) => `<span>${x}</span>`).join('')}</div>`;
     }
   } else if (rec.kind === 'summary') {
+    const fittedTag =
+      rec.fitted && rec.preTruncateChars > rec.memoryChars
+        ? `<span class="tag" title="记忆长期贴着上限，每轮会按板块预算收一点，属于正常压缩">已按板块压缩 ${rec.preTruncateChars - rec.memoryChars} 字</span>`
+        : '';
     body = `<div class="log-line">${esc(rec.slug || '')} 记忆压缩 ${rec.status === 'done' ? '完成' : '失败'}</div>
-      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${rec.warnings.map(warningHtml).join('；')}</span>` : ''}${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${fittedTag}${tokenTag(rec)}${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${rec.warnings.map(warningHtml).join('；')}</span>` : ''}${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
   } else if (rec.kind === 'memory_edit') {
     const act = rec.action === 'save' ? '保存记忆' : 'AI 改写记忆';
     body = `<div class="log-line">${esc(rec.slug || '')} ${act} ${rec.status === 'done' ? '完成' : '失败'}</div>

@@ -170,7 +170,77 @@ function renderMemorySections(sections) {
  * 低优先级分区先「整段丢」，丢不动（或丢它太浪费）就「软裁剪」它自己的正文，
  * 身份与关系永远最后才动；连底座都放不下时才退化为「保留开头 60% + 结尾 40%」。
  */
-function trimMemorySections(body, maxChars) {
+/**
+ * 按分区预算把记忆压到 maxChars 以内（用于写入前整形，不是注入裁剪）：
+ * 七个分区全部保留，不整段丢弃；每次从「当前最长、且仍高于保底」的分区上裁，
+ * 直到总量达标 —— 这样只裁掉真正需要裁的字数，不会过度压缩。
+ *
+ * 与 trimMemorySections 的区别：那个用于「注入时省 token」，可以整段不要；
+ * 这个用于「写盘前压到上限」，目标是尽量少丢内容、且保持记忆结构完整。
+ */
+export function fitMemorySections(body, maxChars) {
+  const sections = splitMemorySections(body);
+  const total = () => renderMemorySections(sections).length;
+  if (!maxChars || total() <= maxChars) return body;
+
+  const FLOOR = {
+    '【身份与称呼】': 200,
+    '【关系】': 300,
+    '【未了之事】': 300,
+  };
+  const lenOf = (sec) => sec.lines.join('\n').trim().length;
+
+  let guard = 0;
+  while (total() > maxChars && guard < 200) {
+    guard += 1;
+    // 挑「可裁余量最大」的分区
+    let pick = null;
+    let pickRoom = 0;
+    for (const sec of sections) {
+      if (!sec.title) continue;
+      const room = lenOf(sec) - (FLOOR[sec.title] ?? 60);
+      if (room > pickRoom) {
+        pick = sec;
+        pickRoom = room;
+      }
+    }
+    if (!pick || pickRoom <= 0) break;
+
+    const excess = total() - maxChars;
+    // 一次只裁到「刚好够」，但不少于 40 字，避免切得过碎
+    const want = Math.min(pickRoom, Math.max(40, excess + 20));
+    trimSectionToBudget(pick, Math.max(FLOOR[pick.title] ?? 60, lenOf(pick) - want));
+  }
+
+  let text = renderMemorySections(sections);
+  if (text.length > maxChars) {
+    const cut = text.slice(0, maxChars);
+    const nl = cut.lastIndexOf('\n');
+    text = nl > maxChars * 0.6 ? cut.slice(0, nl) : cut;
+  }
+  return text;
+}
+
+/** 把分区正文压到 budget 以内：按行累加，超出即停并加省略标记。 */
+function trimSectionToBudget(section, budget) {
+  const bodyText = section.lines.join('\n').trim();
+  if (bodyText.length <= budget) return;
+  const marker = '…（本节较早内容已省略）';
+  const room = budget - marker.length - 1;
+  const keep = [];
+  let used = 0;
+  for (const line of bodyText.split('\n')) {
+    const add = line.length + 1;
+    if (used + add > room) break;
+    keep.push(line);
+    used += add;
+  }
+  if (!keep.length) keep.push(bodyText.slice(0, Math.max(0, room)));
+  keep.push(marker);
+  section.lines = ['', keep.join('\n')];
+}
+
+export function trimMemorySections(body, maxChars) {
   const sections = splitMemorySections(body);
   const dropped = [];
   const clipped = [];
