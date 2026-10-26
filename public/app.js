@@ -304,7 +304,9 @@ function kindOf(rec) {
 }
 function kindBadge(rec) {
   const bad = rec.status === 'error' || rec.status === 'upstream_error';
-  return `<span class="badge ${bad ? 'err' : kindOf(rec)}">${bad ? '错误' : esc(kindOf(rec))}</span>`;
+  const kind = kindOf(rec);
+  const label = bad ? '错误' : esc(kindLabel(kind));
+  return `<span class="badge ${bad ? 'err' : kind}" title="日志类型：${esc(kind)}">${label}<span class="badge-code">${esc(kind)}</span></span>`;
 }
 
 function fmtTok(n) {
@@ -324,6 +326,199 @@ function tokenTag(rec) {
 function noteLabel(n) {
   if (n === 'reply_wrapped_json') return '已按模板补全 JSON';
   return String(n || '');
+}
+
+// ============================================================
+// 日志标识中文对照
+// 日志文件本身仍写英文码（便于 grep 与历史比对、反馈问题时引用），
+// 只在界面上翻成中文；英文原文以小号灰字附在后面，两者都可见。
+// ============================================================
+
+const KIND_LABELS = {
+  npc: 'NPC 对话',
+  costar: '配角',
+  compressor: '游戏压缩器',
+  summary: '记忆压缩',
+  memory_edit: '记忆修改',
+  probe: '探测',
+  idle_flush: '空闲补压记忆',
+  config: '配置变更',
+  memory_write: '记忆落盘',
+  auth: '鉴权失败',
+  server: '服务异常',
+};
+
+const STATUS_LABELS = {
+  done: '完成',
+  ok: '成功',
+  error: '失败',
+  failed: '失败',
+  updated: '已更新',
+  queued: '已排队',
+  skipped: '已跳过',
+  started: '已启动',
+  stopped: '已停止',
+  upstream_error: '上游报错',
+};
+
+/** 请求重写各模块的失败原因。 */
+const REWRITE_ERROR_LABELS = {
+  rewrite_output_format_missing: '找不到「## 输出格式」这一节',
+  rewrite_output_format_changed: '「## 输出格式」的 JSON 结构被改动',
+  rewrite_empty: '模型返回空内容',
+  rewrite_too_short: '重写后太短（不足原文 30%）',
+  rewrite_too_long: '重写后太长（超过原文 150%）',
+  rewrite_duplicate_module: '有模块被重复输出',
+  rewrite_parse_failed: '模型输出格式无法解析',
+  rewrite_module_missing: '漏掉了某个模块',
+  rewrite_cast_name_changed: '配角的名字被改动',
+  rewrite_cast_identity_changed: '配角的身份被改动',
+  all_modules_failed: '所有模块都重写失败，本轮未生效',
+};
+
+const CAST_REJECT_REASONS = {
+  unknown: '没有这个角色',
+  self: '就是当前主角，不能当配角',
+  not_enabled: '这个角色没开启共演',
+  no_intake: '这个角色还没有档案（还没见过面）',
+};
+
+const CAST_SKIP_REASONS = {
+  task: '这是游戏任务轮，配角本轮不接话',
+  no_card: '配角缺少角色档案，本轮不接话',
+  no_costar: '场上没有配角',
+};
+
+/** 上游/网络类错误的常见原文 → 中文。认不出的保留原文。 */
+const ERROR_TEXT_LABELS = {
+  'fetch failed': '连不上上游（网络中断或地址填错）',
+  'This operation was aborted': '请求被中断（可能是超时或关窗）',
+  摘要响应为空: '上游返回了空内容',
+  改写响应为空: '上游返回了空内容',
+  摘要超时: '摘要请求超时',
+  记忆改写超时: '记忆改写请求超时',
+  配角调用超时: '配角请求超时',
+  请求重写超时: '请求重写超时',
+  客户端已断开: '游戏端提前断开了连接',
+  stage_save_failed: '保存在场状态失败',
+  cast_actor_failed: '配角请求失败',
+  summary_failed: '记忆压缩失败',
+};
+
+function kindLabel(kind) {
+  return KIND_LABELS[kind] || String(kind || '');
+}
+
+function statusLabel(status) {
+  return STATUS_LABELS[status] || String(status || '');
+}
+
+function rewriteErrorLabel(code) {
+  const s = String(code || '');
+  const [head, ...rest] = s.split(':');
+  const cn = REWRITE_ERROR_LABELS[head];
+  if (!cn) return s;
+  const tail = rest.length ? '（模块 ' + rest.join(' ') + '）' : '';
+  return cn + tail;
+}
+
+/**
+ * 单条 warning 的中文含义。认不出的码原样返回中文为空，由调用方只显示原文。
+ * @returns {string} 中文说明（可能为空串）
+ */
+function warningLabel(w) {
+  const s = String(w ?? '');
+  const [head, ...rest] = s.split(':');
+  switch (head) {
+    case 'memory_over_limit': {
+      const m = /^(\d+)>(\d+)$/.exec(rest.join(':'));
+      return m ? `记忆 ${m[1]} 字超出上限 ${m[2]} 字，已截断` : '记忆超出上限，已截断';
+    }
+    case 'cast_stage_cleared':
+      return rest[0] === 'scene'
+        ? '换了场景，上回在场的配角已自动清场'
+        : '上回在场的配角闲了太久（超过超时时间），已自动清场';
+    case 'cast_overflow':
+      return '一次进了多个配角，只保留最近一位';
+    case 'cast_command_rejected': {
+      const [name, reason] = rest;
+      return `指令没能让「${name}」入场：${CAST_REJECT_REASONS[reason] || reason}`;
+    }
+    case 'cast_command_noop':
+      return `「${rest[0]}」本来就不在场，离场指令没起作用`;
+    case 'cast_point_ignored':
+      return '本轮发言次数已用完，忽略了这次点名';
+    case 'cast_skipped':
+      return CAST_SKIP_REASONS[rest[0]] || '共演本轮未生效';
+    case 'cast_plan_failed':
+      return `共演规划出错：${rest.join(':')}`;
+    case 'cast_a_wrote_costar':
+      return '主角自己写出了配角的台词，已按配角处理';
+    case 'costar_slot_missed':
+      return '没找到插入配角台词的位置，本轮配角台词没插进去';
+    case 'costar_fallback':
+      return '主角回复不是标准 JSON，配角台词没能插进去';
+    case 'costar_silent':
+      return '配角该开口，但没说出内容';
+    case 'prompt_load_failed':
+      return `读取这个 NPC 的个人提示词失败：${rest.join(':')}`;
+    case 'snapshot_failed':
+      return `保存 system 原文存档失败：${rest.join(':')}`;
+    case 'memory_init_failed':
+      return `初始化记忆失败：${rest.join(':')}`;
+    case 'rewrite_skipped':
+      return '没有可重写的文本 system，跳过了请求重写';
+    case 'rewrite_failed': {
+      const last = rest[rest.length - 1] || '';
+      const why = REWRITE_ERROR_LABELS[last];
+      if (/^module\d+$/.test(rest[0] || '')) {
+        return `第 ${rest[0].replace('module', '')} 个 system 模块重写失败，已回退原文：${why || last}`;
+      }
+      return `请求重写未生效：${why || last || '未知原因'}`;
+    }
+    case 'reply_not_json':
+      return '模型没按 JSON 格式回复，游戏可能显示异常';
+    case 'reply_repaired':
+      return '回复里的 JSON 有瑕疵，已自动修复';
+    case 'reply_wrapped_json':
+      return '已按模板补全 JSON';
+    default:
+      return '';
+  }
+}
+
+/** 通用错误文本的中文化；认不出的原样返回。 */
+function errorTextLabel(text) {
+  const s = String(text ?? '').trim();
+  if (!s) return '';
+  if (ERROR_TEXT_LABELS[s]) return ERROR_TEXT_LABELS[s];
+  const head = s.split(':')[0];
+  if (ERROR_TEXT_LABELS[head]) return ERROR_TEXT_LABELS[head] + '：' + s.slice(head.length + 1);
+  // 上游 401/402/429 这类带状态码的
+  const up = /^上游 (\d{3})[:：]/.exec(s);
+  if (up) {
+    const code = up[1];
+    const hint =
+      {
+        401: 'API Key 无效或已过期',
+        402: '账户余额不足',
+        403: '没有权限',
+        429: '请求太频繁被限流',
+        500: '上游服务出错',
+        502: '上游网关出错',
+        503: '上游服务暂时不可用',
+      }[code] || '上游返回错误';
+    return `${hint}（HTTP ${code}）`;
+  }
+  return s;
+}
+
+/** warning 渲染：中文说明 + 英文原码（原码始终可见，便于反馈时引用）。 */
+function warningHtml(w) {
+  const raw = String(w ?? '');
+  const cn = warningLabel(raw);
+  if (!cn) return `<span class="log-code">${esc(raw)}</span>`;
+  return `${esc(cn)}<span class="log-code">${esc(raw)}</span>`;
 }
 
 function originLabel(origin) {
@@ -383,7 +578,9 @@ function renderDetail(d) {
   const reply = d.reply
     ? `<pre class="detail-pre">${esc(d.reply)}</pre>`
     : '<p class="detail-note">（无回复文本）</p>';
-  const error = d.error ? `<p class="detail-note warn">错误：${esc(d.error)}</p>` : '';
+  const error = d.error
+    ? `<p class="detail-note warn">错误：${esc(errorTextLabel(d.error))}<span class="log-code">${esc(d.error)}</span></p>`
+    : '';
 
   const tk = d.tokens;
   const tokenLine =
@@ -482,7 +679,7 @@ function renderDetail(d) {
                     ? '已改写（格式已修复）'
                     : '格式已修复（内容未变）'
                   : '已改写'
-              : '未改动（' + esc(m.error || '校验失败') + '）'
+              : '未改动（校验未通过：' + esc(rewriteErrorLabel(m.error || '校验失败')) + '）'
           }</h6>
           <p class="detail-note">${m.originalChars ?? '—'} 字 → ${m.rewrittenChars ?? '—'} 字 · 删除 ${m.removedCount ?? 0} 行 / 新增 ${m.addedCount ?? 0} 行</p>
           ${m.removed && m.removed.length ? `<p class="detail-note">删除的原文行：</p><pre class="detail-pre">${esc(m.removed.join('\n'))}</pre>` : ''}
@@ -497,7 +694,7 @@ function renderDetail(d) {
     rewriteBlock = `
       <div class="detail-section">
         <h5>请求重写（实验性）· ${rwLabel}</h5>
-        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rw.error)}` : ''}${rw.cacheHit ? ` · <strong>命中缓存</strong>（省 ${rw.savedDurationMs || 0}ms / ${fmtTok(rw.savedTokens || 0)} tok${rw.cacheAgeMs != null ? `，缓存 ${Math.round(rw.cacheAgeMs / 1000)} 秒前` : ''}）` : ''}</p>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rewriteErrorLabel(rw.error))}` : ''}${rw.cacheHit ? ` · <strong>命中缓存</strong>（省 ${rw.savedDurationMs || 0}ms / ${fmtTok(rw.savedTokens || 0)} tok${rw.cacheAgeMs != null ? `，缓存 ${Math.round(rw.cacheAgeMs / 1000)} 秒前` : ''}）` : ''}</p>
         ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
         ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
         <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>
@@ -641,7 +838,7 @@ function renderLog(rec) {
           }
           ${tokenTag(rec)}
           ${timing.map((x) => `<span>${x}</span>`).join('')}
-          ${warnList.length ? `<span class="warn">⚠ ${esc(warnList.join('；'))}</span>` : ''}
+          ${warnList.length ? `<span class="warn">⚠ ${warnList.map(warningHtml).join('；')}</span>` : ''}
           ${noteList.length ? `<span class="tag">${esc(noteList.map(noteLabel).join('；'))}</span>` : ''}
         </div>`;
     } else {
@@ -649,11 +846,11 @@ function renderLog(rec) {
     }
   } else if (rec.kind === 'summary') {
     body = `<div class="log-line">${esc(rec.slug || '')} 记忆压缩 ${rec.status === 'done' ? '完成' : '失败'}</div>
-      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${rec.warnings.map(warningHtml).join('；')}</span>` : ''}${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
   } else if (rec.kind === 'memory_edit') {
     const act = rec.action === 'save' ? '保存记忆' : 'AI 改写记忆';
     body = `<div class="log-line">${esc(rec.slug || '')} ${act} ${rec.status === 'done' ? '完成' : '失败'}</div>
-      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}</div>`;
+      <div class="log-meta">${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}${rec.generatedChars != null ? `<span>生成 ${rec.generatedChars} 字</span>` : ''}${rec.memoryChars != null ? `<span>${rec.memoryChars} 字</span>` : ''}${tokenTag(rec)}${rec.backup ? `<span>备份 ${esc(rec.backup)}</span>` : ''}${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
   } else if (rec.kind === 'costar') {
     body = `<div class="log-line"><span class="who">配角：</span>${esc(rec.actor || '')} <span class="muted">（为 ${esc(rec.slug || '')} 配戏${
       rec.turnId ? ' · ' + esc(String(rec.turnId).slice(-4)) : ''
@@ -664,13 +861,30 @@ function renderLog(rec) {
         ${rec.mode ? `<span>${rec.mode === 'head' ? '配角先说' : '配角接话'}</span>` : ''}
         ${rec.durationMs != null ? `<span>${rec.durationMs}ms</span>` : ''}
         ${tokenTag(rec)}
-        ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${esc(rec.warnings.join('；'))}</span>` : ''}
-        ${rec.error ? `<span class="warn">${esc(rec.error)}</span>` : ''}
+        ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${rec.warnings.map(warningHtml).join('；')}</span>` : ''}
+        ${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}
       </div>`;
   } else if (rec.kind === 'auth') {
-    body = `<div class="log-line warn">鉴权失败：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
+    body = `<div class="log-line warn">鉴权失败（游戏端的 API Key 与本程序不一致）：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
+  } else if (rec.kind === 'idle_flush') {
+    body = `<div class="log-line">${esc(rec.slug || '')} 空闲补压记忆：已排队</div>
+      <div class="log-meta">
+        ${rec.turns != null ? `<span>已聊 ${rec.turns} 轮</span>` : ''}
+        ${rec.lastSummaryTurn != null ? `<span>上次压到第 ${rec.lastSummaryTurn} 轮</span>` : ''}
+        ${rec.idleMs != null ? `<span>已空闲 ${Math.round(rec.idleMs / 60000)} 分钟</span>` : ''}
+      </div>`;
+  } else if (rec.kind === 'memory_write') {
+    body = `<div class="log-line">${esc(rec.slug || '')} 记忆落盘 ${rec.status === 'error' ? '失败' : '完成'}</div>
+      <div class="log-meta">${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
   } else {
-    body = `<div class="log-line">${esc(rec.status || '')} ${esc(rec.error || rec.kind || '')}</div>`;
+    const st = statusLabel(rec.status);
+    const errCn = rec.error ? errorTextLabel(rec.error) : '';
+    body = `<div class="log-line">${esc(kindLabel(rec.kind))}${st ? ' · ' + esc(st) : ''}${
+      errCn ? ` · <span class="warn">${esc(errCn)}</span>` : ''
+    }</div>
+      <div class="log-meta">${rec.status ? `<span>状态码：${esc(rec.status)}</span>` : ''}${
+        rec.error ? `<span class="log-code">${esc(rec.error)}</span>` : ''
+      }</div>`;
   }
 
   div.innerHTML = `<div class="log-head">${kindBadge(rec)}<span>${t}</span><span>#${rec.seq}</span>${

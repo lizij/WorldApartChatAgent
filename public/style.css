@@ -135,6 +135,15 @@ textarea:focus { border-color: var(--accent); }
 .badge.probe { background: #555; }
 .badge.server, .badge.config, .badge.auth { background: #6b5a28; }
 .badge.err { background: #8a3a3a; }
+.badge.idle_flush { background: #2b6b70; }
+.badge.memory_write { background: #6a4f7a; }
+/* 徽章里的英文原码：小一号、半透明，保留可读性以便反馈问题时引用 */
+.badge-code { margin-left: 5px; font-size: 10px; opacity: 0.72; letter-spacing: 0.2px; }
+/* 日志里的英文原码（warning / error 的中文说明之后） */
+.log-code {
+  margin-left: 5px; font-family: ui-monospace, Consolas, monospace; font-size: 10.5px;
+  color: var(--muted); opacity: 0.8; white-space: nowrap;
+}
 select {
   width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); padding: 7px 10px; font-size: 13px; outline: none;

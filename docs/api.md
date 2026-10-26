@@ -18,3 +18,10 @@
 
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、
 注入字符数、外置提示词字符数、请求重写状态与额外 token、是否新建档、warnings、上游状态；回复非 JSON 时在 NPC 页标 ⚠。
+
+> **日志码与界面文案**：日志文件（`logs/YYYY-MM-DD.jsonl`）里 `kind` / `status` / `warnings` /
+> `rewrite.error` 一律写**英文码**（如 `cast_stage_cleared:idle`、`memory_over_limit:3266>3000`），
+> 便于 grep 与逐版本比对；管理页只负责翻译——中文说明在前，英文原码以小号灰字附在后面
+> （悬停日志类型徽章也能看到原码）。新增码时在 `public/app.js` 的 `KIND_LABELS` /
+> `STATUS_LABELS` / `REWRITE_ERROR_LABELS` / `ERROR_TEXT_LABELS` / `warningLabel()` 里补一条中文；
+> **没登记的新码会自动退化为只显示原码**，不会空白，也不会挡住功能。
