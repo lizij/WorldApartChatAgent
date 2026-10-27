@@ -365,7 +365,7 @@ function strIn(v, maxLen) {
   return s.slice(0, maxLen);
 }
 
-export function createServer({ config, logger }) {
+export function createServer({ config, logger, getPortFallback = null }) {
   const queues = new KeyedQueue();
   const summarizer = new Summarizer({ config, logger, queue: queues });
   const rewriter = new MemoryRewriter({ config, queue: queues });
@@ -414,6 +414,9 @@ export function createServer({ config, logger }) {
         isTest: IS_TEST,
         dataDir: DATA_DIR,
         baseUrl: `http://${c.server.host}:${c.server.port}/v1`,
+        port: c.server.port,
+        // 本次启动是否因端口被占用而自动顺延（null = 未发生）；用于管理页区分“自动换过”和“玩家自己改的端口”
+        portFallback: typeof getPortFallback === 'function' ? getPortFallback() : null,
         apiKey: c.server.apiKey,
         servedModel: c.server.servedModel,
         upstream: {

@@ -124,6 +124,7 @@ textarea:focus { border-color: var(--accent); }
 .log-item.probe { border-left-color: var(--muted); }
 .log-item.error, .log-item[data-status="error"], .log-item[data-status="upstream_error"] { border-left-color: var(--red); }
 .log-item.server { border-left-color: var(--yellow); }
+.log-item[data-status="port_fallback"] { border-left-color: var(--green); }
 .log-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
 .badge {
   border-radius: 4px; padding: 0 6px; font-size: 11px; line-height: 18px; color: #fff;
@@ -137,6 +138,7 @@ textarea:focus { border-color: var(--accent); }
 .badge.err { background: #8a3a3a; }
 .badge.idle_flush { background: #2b6b70; }
 .badge.memory_write { background: #6a4f7a; }
+.badge.port_fallback { background: #2f6b4f; }
 /* 徽章里的英文原码：小一号、半透明，保留可读性以便反馈问题时引用 */
 .badge-code { margin-left: 5px; font-size: 10px; opacity: 0.72; letter-spacing: 0.2px; }
 /* 日志里的英文原码（warning / error 的中文说明之后） */

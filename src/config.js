@@ -53,11 +53,14 @@ function randomKey() {
   return 'wfc-' + crypto.randomBytes(20).toString('hex');
 }
 
+/** 默认端口。端口被占用时 src/app.js 会向后顺延，并把实际端口写回配置。 */
+export const DEFAULT_PORT = 8790;
+
 export function defaults() {
   return {
     server: {
       host: '127.0.0.1',
-      port: 8790,
+      port: DEFAULT_PORT,
       // 游戏侧在 Authorization: Bearer 或 x-api-key 中携带；首次运行自动生成
       apiKey: randomKey(),
       // 对外暴露的模型 id（游戏里填这个）；任意传入 model 都会映射到上游模型

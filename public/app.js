@@ -90,6 +90,9 @@ function renderCacheModes(selected = 'none') {
   updateCacheModeHint();
 }
 
+// 默认端口；后端在端口被占用时会自动顺延并把实际端口写回配置。
+const DEFAULT_PORT = 8790;
+
 // —— 配置 ——
 async function loadStatus() {
   const s = await api('/api/status');
@@ -99,7 +102,34 @@ async function loadStatus() {
   $('#apiKey').value = s.apiKey;
   $('#servedModelView').value = s.servedModel;
   $('#dataDirView').value = s.dataDir || '';
+  renderPortNotice(s);
   setConn(true);
+}
+
+/** 端口被自动顺延过（已写回配置，重启也不会回到 8790）时必须告诉玩家改游戏里的 Base URL。 */
+function renderPortNotice(s) {
+  const el = $('#portNotice');
+  if (!el) return;
+  const port = Number(s?.port) || 0;
+  const auto = s?.portFallback;
+  if (auto && auto.to) {
+    // 本次启动确实发生过顺延：强提醒，否则游戏还指着旧端口，会表现为“游戏没反应”。
+    el.hidden = false;
+    el.className = 'hint warn';
+    el.textContent =
+      `⚠ 端口 ${auto.from} 已被占用，本程序自动改用 ${port}（已保存到配置，重启仍是 ${port}）。` +
+      `请把游戏里的 Base URL 改成 http://127.0.0.1:${port}/v1，否则游戏会连不上。`;
+    return;
+  }
+  if (port && port !== DEFAULT_PORT) {
+    // 玩家自己改过端口：只提示两边要一致，不说成“自动切换”。
+    el.hidden = false;
+    el.className = 'hint';
+    el.textContent = `当前使用非默认端口 ${port}，游戏里的 Base URL 需与之一致：http://127.0.0.1:${port}/v1`;
+    return;
+  }
+  el.hidden = true;
+  el.textContent = '';
 }
 
 async function loadConfig() {
@@ -110,6 +140,8 @@ async function loadConfig() {
   $('#upApiKey').placeholder = c.upstream.apiKeySet ? '已设置（' + c.upstream.apiKey + '），留空不修改' : '未设置，请填写';
   $('#upDisableThinking').checked = !!c.upstream.disableThinking;
   $('#upIncludeUsage').checked = !!c.upstream.includeUsage;
+  $('#upConnectTimeout').value = c.upstream.connectTimeoutMs ?? 15000;
+  $('#upRequestTimeout').value = c.upstream.requestTimeoutMs ?? 300000;
   $('#memEnabled').checked = !!c.memory.enabled;
   $('#memSnapshot').checked = !!c.memory.snapshotSystem;
   $('#sumEnabled').checked = !!c.memory.summarizer.enabled;
@@ -147,6 +179,8 @@ $('#saveUpstream').addEventListener('click', async () => {
       model: $('#upModel').value.trim(),
       disableThinking: $('#upDisableThinking').checked,
       includeUsage: $('#upIncludeUsage').checked,
+      connectTimeoutMs: Number($('#upConnectTimeout').value) || 15000,
+      requestTimeoutMs: Number($('#upRequestTimeout').value) || 300000,
     },
   };
   const key = $('#upApiKey').value.trim();
@@ -305,8 +339,12 @@ function kindOf(rec) {
 function kindBadge(rec) {
   const bad = rec.status === 'error' || rec.status === 'upstream_error';
   const kind = kindOf(rec);
-  const label = bad ? '错误' : esc(kindLabel(kind));
-  return `<span class="badge ${bad ? 'err' : kind}" title="日志类型：${esc(kind)}">${label}<span class="badge-code">${esc(kind)}</span></span>`;
+  // 少量“按 status 才有意义”的记录：类型名本身会误导（server 默认叫“服务异常”，
+  // 但端口顺延是正常的自愈行为，不是故障）。
+  const byStatus = rec.status === 'port_fallback' ? '端口已切换' : '';
+  const label = bad ? '错误' : esc(byStatus || kindLabel(kind));
+  const cls = bad ? 'err' : rec.status === 'port_fallback' ? 'port_fallback' : kind;
+  return `<span class="badge ${cls}" title="日志类型：${esc(kind)}">${label}<span class="badge-code">${esc(kind)}</span></span>`;
 }
 
 function fmtTok(n) {
@@ -358,6 +396,7 @@ const STATUS_LABELS = {
   skipped: '已跳过',
   started: '已启动',
   stopped: '已停止',
+  port_fallback: '端口已自动切换',
   upstream_error: '上游报错',
 };
 
@@ -870,6 +909,13 @@ function renderLog(rec) {
         ${rec.warnings && rec.warnings.length ? `<span class="warn">⚠ ${rec.warnings.map(warningHtml).join('；')}</span>` : ''}
         ${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}
       </div>`;
+  } else if (rec.kind === 'server' && rec.status === 'port_fallback') {
+    body = `<div class="log-line warn">端口 ${esc(String(rec.from ?? ''))} 已被占用，已自动切换到 ${esc(
+      String(rec.to ?? ''),
+    )}</div>
+      <div class="log-meta"><span>实际端口已写入配置，重启仍使用该端口</span><span>请把游戏 Base URL 改成 http://127.0.0.1:${esc(
+        String(rec.to ?? ''),
+      )}/v1</span></div>`;
   } else if (rec.kind === 'auth') {
     body = `<div class="log-line warn">鉴权失败（游戏端的 API Key 与本程序不一致）：${esc(rec.path || '')} @ ${esc(rec.ip || '')}</div>`;
   } else if (rec.kind === 'idle_flush') {

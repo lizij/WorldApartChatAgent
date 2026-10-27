@@ -5,10 +5,11 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| `server.host/port/apiKey/servedModel` | 本地监听与游戏侧凭证（改端口需重启） |
+| `server.host/port/apiKey/servedModel` | 本地监听与游戏侧凭证（改端口需重启）。**端口被占用时启动会自动向后顺延**（8790→8809 内找空闲端口），把实际端口写回 `config.json` 并在管理页提示改游戏 Base URL；不会自动切回 8790 |
 | `upstream.baseUrl/apiKey/model` | 真实 Provider；baseUrl 带不带 `/v1` 均可 |
 | `upstream.disableThinking` | 默认 `false`：**不干涉上游思考**，与游戏裸模型行为一致。设为 `true` 才会补 `thinking:{type:"disabled"}`（更低延迟，但会削弱对复杂 system 规则的遵从）；无论开关如何，调用方显式带 `thinking` 时都不覆盖 |
 | `upstream.includeUsage` | 默认 `false`：流式请求不主动注入 `stream_options.include_usage`，避免多出的 `choices: []` 汇总 chunk 影响游戏端解析。开启后每轮可拿到精确 token 总数（执行日志仍只显示总数）；关闭时按字符估算并标 `≈` |
+| `upstream.connectTimeoutMs/requestTimeoutMs` | 建立连接超时（默认 `15000`）/ 请求总超时兼流式空闲超时（默认 `300000`）。管理页「上游 Provider」可直接改，慢速 Provider（如 GLM）可调大；若游戏端自己先超时，调大这里无效 |
 | `memory.enabled` | 记忆总开关；关闭等同纯透传 |
 | `memory.injectMaxChars` | 注入长期记忆字符上限（默认 5600，= 记忆上限 + 200；比上限小会出现「写得进、注入不到」）。超出时**按分区优先级裁剪**：【赠予往来】→【同场】→【习惯与忌讳】→【经历与进度】→【未了之事】→【关系】→【身份与称呼】，身份与关系最后才动；裁剪只影响注入，不改磁盘文件 |
 | `memory.snapshotSystem` | system 内容变化时存档原文 |

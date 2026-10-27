@@ -2,7 +2,7 @@
 
 > 从 AGENTS.md §5 抽离。管理接口只接受本机访问、无需游戏 Key；游戏侧接口需 API Key。
 
-- `GET /api/status`：连接信息、上游状态、记忆/提示词开关、请求重写开关
+- `GET /api/status`：连接信息（`baseUrl` 反映**实际监听端口**，另给 `port`）、上游状态、记忆/提示词开关、请求重写开关
 - `GET/PUT /api/config`：查看/保存配置（上游 Key 掩码显示，留空不修改；保存即时生效；含 `prompts.enabled/global`、`requestRewrite.*`）
 - `GET /api/events`：SSE，实时推送每条运行日志
 - `GET /api/logs?limit=`：最近日志（接口按时间正序返回；管理页展示时按时间倒序，最新在上）

@@ -65,9 +65,15 @@ async function bootstrap() {
     const cfg = await startBackend();
     mainWindow = createWindow(cfg.server.port);
   } catch (err) {
+    const from = Array.isArray(err.portRange) ? err.portRange[0] : err && err.port;
+    const to = Array.isArray(err.portRange) ? err.portRange[1] : err && err.port;
     const hint =
       err && err.code === 'EADDRINUSE'
-        ? `端口 ${err.port} 已被占用。请关闭占用程序，或修改 data/config.json 的 server.port 后重试。`
+        ? `端口 ${from}-${to} 均已被占用。\n\n` +
+          `请关闭占用这些端口的程序（常见：本程序的残留进程、其他 AI 工具）后重试。\n` +
+          `程序会在端口被占用时自动顺延到下一个空闲端口，并把结果写进配置，` +
+          `因此通常只需关掉占用者重启即可。\n\n` +
+          `数据目录：${process.env.WFC_HOME || '(未设置)'}`
         : String((err && err.stack) || err);
     dialog.showErrorBox('不问凡尘 NPC Agent 启动失败', hint);
     app.exit(1);

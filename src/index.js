@@ -45,7 +45,13 @@ app
   })
   .catch((err) => {
     if (err?.code === 'EADDRINUSE') {
-      console.error(`端口 ${err.port} 已被占用，请修改 data/config.json 的 server.port 后重启。`);
+      const from = Array.isArray(err.portRange) ? err.portRange[0] : err.port;
+      const to = Array.isArray(err.portRange) ? err.portRange[1] : err.port;
+      console.error(
+        `端口 ${from}-${to} 均已被占用。\n` +
+          `请关闭占用这些端口的程序（常见：本程序的残留进程、其他 AI 工具）后重启。\n` +
+          `数据目录：${app.dataDir}`,
+      );
     } else {
       console.error('服务启动失败:', err);
     }

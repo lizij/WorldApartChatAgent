@@ -32,7 +32,7 @@
 
 | 命令 | 作用 | 数据目录 |
 | --- | --- | --- |
-| `npm start` | 仅启动后端（CLI），浏览器访问 `http://127.0.0.1:8790/` | `data/`（正式档） |
+| `npm start` | 仅启动后端（CLI），浏览器访问 `http://127.0.0.1:8790/`（端口被占用时自动顺延，实际端口见启动横幅） | `data/`（正式档） |
 | `npm run start:test` | CLI 启动测试档 | `data_test/` |
 | `npm run dev:desktop` | 先 `build:backend`，再启动 Electron 窗口 | `data/`（加 `--test` 走 `data_test/`） |
 | `npm run build:backend` | 仅用 esbuild 生成 `dist/backend.cjs` | — |
@@ -41,7 +41,10 @@
 - 两档**完全隔离**：各有独立 `config.json`（各自 API Key）、`npcs/`、`logs/`；调试一律用测试档，
   禁止把测试数据写进正式档。
 - 受单实例锁约束，同一时间只能运行一个档位；先关掉当前实例再切换。
-- 管理页保存的配置即时生效；`server.port` 这类改动需重启。
+  （CLI 与桌面窗口不同名，可以并存；端口冲突时后者自动顺延并写回自己的 `config.json`，
+  此时管理页会提示改游戏 Base URL。）
+- 管理页保存的配置即时生效；`server.port` 这类改动需重启。端口被占用时启动会自动顺延
+  到下一个空闲端口并写回配置，不会报错退出。
 
 ---
 
