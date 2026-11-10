@@ -129,7 +129,8 @@ export function defaults() {
       timeoutMs: 60000,
       temperature: 0.2,
       // 缓存机制（默认不启用）：none | exact。
-      // exact = 机制 1「整轮指纹缓存」：最终重写请求体逐字节相同时复用上次已验证结果。
+      // exact = 机制 1「模块级指纹缓存」：单个 system 模块原文 + 外置设定/记忆不变时
+      //         复用上次已校验的草稿；只有变化的模块才送去重写，全部命中时不调用上游。
       cache: {
         mode: 'none',
         // 全局 LRU 上限；每个机制单独一个 data/rewrite-cache-<mode>.json

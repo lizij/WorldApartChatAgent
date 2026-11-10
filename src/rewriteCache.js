@@ -4,12 +4,14 @@
  * 设计要点：
  *   - 缓存键本身已包含 NPC slug，因此不需要按 NPC 分文件；
  *     每个机制在 data/ 下单独维护一个全局文件，例如
- *     data/rewrite-cache-exact.json（机制 1：整轮指纹缓存）。
+ *     data/rewrite-cache-exact.json（机制 1：模块级指纹缓存）。
+ *   - 条目是**单个 system 模块**的改写草稿（`text`），不是整轮上游回复；
+ *     键含模块原文 + 外置设定/记忆哈希，因此记忆一更新就整体失效。
  *   - 运行期只读写内存 LRU，变更后防抖异步落盘，避免每轮重写 8MB 全量 JSON。
  *   - 默认上限 1000 条，超出按最久未使用淘汰；条目带 createdAt，读取时按 TTL 过滤。
  *   - 仅加速，不是事实来源：文件损坏、写失败、进程退出丢最后一段都可接受。
- *   - 首次加载时会把 0.13.x 及更早的 data/npcs/<slug>/rewrite-cache.json
- *     合并进机制 1 的全局文件，成功落盘后删除旧文件。
+ *   - 文件带结构版本（`CACHE_FILE_VERSION`），版本不匹配整体作废；
+ *     0.13.x 的逐 NPC 整轮缓存键已不可复用，加载时直接删除旧文件。
  */
 import fs from 'node:fs';
 import path from 'node:path';
