@@ -19,6 +19,8 @@ import { NPCS_DIR } from './memory/store.js';
 const LEGACY_FILE = 'rewrite-cache.json';
 const DEFAULT_MAX_ENTRIES = 1000;
 const DEFAULT_DEBOUNCE_MS = 2000;
+/** 文件结构版本：条目形状变更时递增，旧文件整体作废。 */
+const CACHE_FILE_VERSION = 2;
 
 let tmpSeq = 0;
 
@@ -83,16 +85,23 @@ export class RewriteCache {
     try {
       data = JSON.parse(fs.readFileSync(store.file, 'utf8'));
     } catch {}
-    if (data && Array.isArray(data.entries)) {
+    // 文件版本不匹配时整体作废：缓存只是加速器，宁可重新算，也不读结构不明的旧条目。
+    if (data && Number(data.version) === CACHE_FILE_VERSION && Array.isArray(data.entries)) {
       for (const entry of data.entries) {
-        if (!entry || typeof entry.key !== 'string' || typeof entry.raw !== 'string') continue;
+        if (!entry || typeof entry.key !== 'string') continue;
+        // 机制 1 旧结构存 raw（整轮回复），新结构存 text（单模块草稿）。
+        if (typeof entry.text !== 'string' && typeof entry.raw !== 'string') continue;
         store.entries.set(entry.key, entry);
       }
     }
-    // 旧版逐 NPC 缓存只在机制 1 上迁移
+    // 旧版逐 NPC 缓存只在机制 1 上处理
     if (store.mode === 'exact') this.#migrateLegacy(store);
   }
 
+  /**
+   * 0.13.x 及更早的逐 NPC 整轮缓存与当前「模块级」键不可复用
+   * （键的构造方式已变），直接清掉即可——缓存只是加速器，重新算不影响正确性。
+   */
   #migrateLegacy(store) {
     let slugs = [];
     try {
@@ -100,36 +109,9 @@ export class RewriteCache {
     } catch {
       return;
     }
-    const legacyFiles = [];
-    let merged = false;
     for (const slug of slugs) {
       const file = path.join(this.npcsDir, slug, LEGACY_FILE);
       if (!fs.existsSync(file)) continue;
-      let data = null;
-      try {
-        data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      } catch {
-        continue;
-      }
-      if (!data || !Array.isArray(data.entries)) continue;
-      for (const entry of data.entries) {
-        if (!entry || typeof entry.key !== 'string' || typeof entry.raw !== 'string') continue;
-        const prev = store.entries.get(entry.key);
-        if (!prev || (Number(entry.createdAt) || 0) > (Number(prev.createdAt) || 0)) {
-          store.entries.set(entry.key, entry);
-          merged = true;
-        }
-      }
-      legacyFiles.push(file);
-    }
-    if (!legacyFiles.length) return;
-    // 先同步落盘，确保迁移结果先于旧文件删除；失败则保留旧文件下次再试
-    try {
-      if (merged || !fs.existsSync(store.file)) this.#writeSync(store);
-    } catch {
-      return;
-    }
-    for (const file of legacyFiles) {
       try {
         fs.rmSync(file, { force: true });
       } catch {}
@@ -139,7 +121,7 @@ export class RewriteCache {
   #writeSync(store) {
     const tmp = tmpPathFor(store.file);
     const payload = JSON.stringify({
-      version: 1,
+      version: CACHE_FILE_VERSION,
       mode: store.mode,
       entries: [...store.entries.values()],
     });
@@ -161,7 +143,7 @@ export class RewriteCache {
         store.dirty = false;
         const tmp = tmpPathFor(store.file);
         const payload = JSON.stringify({
-          version: 1,
+          version: CACHE_FILE_VERSION,
           mode: store.mode,
           entries: [...store.entries.values()],
         });
@@ -215,6 +197,14 @@ export class RewriteCache {
     while (store.entries.size > limit) {
       store.entries.delete(store.entries.keys().next().value);
     }
+    this.#schedule(store);
+  }
+
+  /** 删除单条（校验规则升级导致旧结果不可用时使用）。 */
+  delete(mode, key) {
+    if (!mode || !key) return;
+    const store = this.#store(mode);
+    if (!store.entries.delete(key)) return;
     this.#schedule(store);
   }
 

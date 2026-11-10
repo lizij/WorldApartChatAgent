@@ -45,7 +45,8 @@ export const VERSION = process.env.WFC_VERSION || pkgVersion();
  * 请求重写缓存机制白名单。后续新增机制时在这里登记，并在
  * requestRewrite.js / 管理页下拉菜单中补对应实现与选项。
  *   none  不启用
- *   exact 机制 1：整轮指纹缓存（最终重写请求体逐字节相同才复用）
+ *   exact 机制 1：模块级指纹缓存（单个 system 模块原文 + 上下文相同才复用，
+ *         只有变化的模块送去重写；全部命中时不调用上游）
  */
 export const REWRITE_CACHE_MODES = ['none', 'exact'];
 

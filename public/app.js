@@ -35,8 +35,8 @@ const CACHE_MODE_OPTIONS = [
   },
   {
     value: 'exact',
-    label: '整轮指纹缓存',
-    desc: '整份重写输入（全部 system 模块、长期记忆、提示词、模型参数）逐字节相同时，复用上次已校验的结果；输入有任何变化都会完整重写。全局 LRU 默认 1000 条。历史命中率约 50%，命中轮中位耗时约 3 秒。',
+    label: '模块指纹缓存',
+    desc: '按单个 system 模块建指纹（模块原文 + 外置设定/记忆 + 模型参数 + 上游地址）：只有变化的模块才送去重写，其余复用上次已校验的草稿；全部命中时本轮不调用上游。全局 LRU 默认 1000 条。',
   },
 ];
 
@@ -508,6 +508,10 @@ function warningLabel(w) {
     case 'memory_init_failed':
       return `初始化记忆失败：${rest.join(':')}`;
     case 'rewrite_skipped':
+      if (rest[0] === 'only_fact_modules') return '本轮只有游戏结算事实模块，没有需要重写的设定，已跳过';
+      if (rest[0] === 'mixed_fact_module') {
+        return '有一条消息把游戏事实和设定混在了一起，已整条原样透传（该设定本轮未被改写）';
+      }
       return '没有可重写的文本 system，跳过了请求重写';
     case 'rewrite_failed': {
       const last = rest[rest.length - 1] || '';
@@ -518,7 +522,9 @@ function warningLabel(w) {
       return `请求重写未生效：${why || last || '未知原因'}`;
     }
     case 'reply_not_json':
-      return '模型没按 JSON 格式回复，游戏可能显示异常';
+      return '模型没按 JSON 格式回复，已尝试按模板补全，游戏仍可能显示异常';
+    case 'reply_not_json_stream':
+      return '模型没按 JSON 格式回复，流式已原样发出，游戏可能显示异常';
     case 'reply_repaired':
       return '回复里的 JSON 有瑕疵，已自动修复';
     case 'reply_wrapped_json':
@@ -735,7 +741,7 @@ function renderDetail(d) {
     rewriteBlock = `
       <div class="detail-section">
         <h5>请求重写（实验性）· ${rwLabel}</h5>
-        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个 · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rewriteErrorLabel(rw.error))}` : ''}${rw.cacheHit ? ` · <strong>命中缓存</strong>（省 ${rw.savedDurationMs || 0}ms / ${fmtTok(rw.savedTokens || 0)} tok${rw.cacheAgeMs != null ? `，缓存 ${Math.round(rw.cacheAgeMs / 1000)} 秒前` : ''}）` : ''}</p>
+        <p class="detail-note">耗时 ${rw.timing?.durationMs ?? '—'}ms · 额外 token ${rwTok} · 模块 ${rw.moduleCount ?? modules.length} 个，改写 ${rw.changedCount ?? changedModules.length} 个${rw.droppedCount ? `（整模块删除 ${rw.droppedCount} 个）` : ''}${rw.repairedCount ? `，修复格式 ${rw.repairedCount} 个` : ''}，失败 ${rw.failedCount ?? 0} 个${rw.cachedModules ? `，缓存命中 ${rw.cachedModules} 个` : ''}${rw.skippedFacts ? `，事实模块透传 ${rw.skippedFacts} 个` : ''} · 删除 ${rw.removedCount ?? 0} 行 / 新增 ${rw.addedCount ?? 0} 行${rw.error ? ` · 原因：${esc(rewriteErrorLabel(rw.error))}` : ''}${rw.cacheHit ? ` · <strong>缓存全命中</strong>（省 ${rw.savedDurationMs || 0}ms / ${fmtTok(rw.savedTokens || 0)} tok${rw.cacheAgeMs != null ? `，缓存 ${Math.round(rw.cacheAgeMs / 1000)} 秒前` : ''}）` : ''}</p>
         ${moduleHtml || '<p class="detail-note">（没有发生改写的模块）</p>'}
         ${unchangedModules.length ? `<p class="detail-note">未改动模块：${unchangedModules.map((m) => esc(m.title || '')).join('、')}</p>` : ''}
         <details class="rw-details"><summary>重写调用 Prompt（${(rw.messages || []).length} 条消息）</summary>${rwMessages || '<p class="detail-note">（无）</p>'}</details>
@@ -862,7 +868,7 @@ function renderLog(rec) {
                       : '失败'
                 }${
                   rec.rewrite.cacheHit
-                    ? ` ${rec.rewrite.cacheMode === 'exact' ? '机制 1 ' : ''}缓存命中 · 省 ${
+                    ? ` ${rec.rewrite.cacheMode === 'exact' ? '机制 1 ' : ''}缓存全命中 · 省 ${
                         rec.rewrite.savedDurationMs
                           ? Math.round(rec.rewrite.savedDurationMs / 1000) + 's'
                           : '—'
@@ -871,6 +877,8 @@ function renderLog(rec) {
                         rec.rewrite.changedModules != null
                           ? ` 改写 ${rec.rewrite.changedModules}/${rec.rewrite.modules} 模块`
                           : ''
+                      }${rec.rewrite.cachedModules ? `（缓存 ${rec.rewrite.cachedModules} 个）` : ''}${
+                        rec.rewrite.skippedFacts ? ` · 事实透传 ${rec.rewrite.skippedFacts} 个` : ''
                       }${rec.rewrite.durationMs != null ? ' ' + rec.rewrite.durationMs + 'ms' : ''}${
                         rec.rewriteTokens != null ? ' · ' + fmtTok(rec.rewriteTokens) + ' tok' : ''
                       }`

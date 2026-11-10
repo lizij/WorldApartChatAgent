@@ -19,7 +19,7 @@ import {
   effectiveMemoryChars,
   effectiveInjectChars,
 } from './config.js';
-import { classify } from './identify.js';
+import { classify, isFactModule, mergePendingFacts } from './identify.js';
 import {
   openNpc,
   snapshotSystem,
@@ -60,10 +60,18 @@ const MEMORY_EDIT_MAX_CHARS = 4000;
 /** 手工保存记忆正文的上限（字）；防止误粘贴超长文本。 */
 const MEMORY_TEXT_MAX_CHARS = 200000;
 
-/** 输出格式强化提醒（注入与日志来源标注共用同一常量）。 */
+/**
+ * 输出格式强化提醒（注入与日志来源标注共用同一常量）。
+ *
+ * 只强调「唯一一个 JSON 对象」这条技术契约；content 里要不要写动作/旁白，
+ * 由本轮 `## 输出格式` 的字段说明与外置设定决定——2026-11 游戏更新后
+ * 该契约改成了「content 只写台词，不写括号旁白」，不能再硬编码成相反要求。
+ */
 const FORMAT_REMINDER =
   '再次提醒：本轮必须且只能输出系统要求的那个 JSON 对象（不要 JSON 代码围栏、不要解释、不要输出 JSON 之外的文字）。' +
-  'content 只写你本人这一轮的动作与台词，不要写成多说话人剧本，也不要替在场其他角色写「名字：台词」。';
+  '第一个字符必须是「{」，最后一个字符必须是「}」。' +
+  'content 写你本人的台词；动作、表情、旁白是否写入 content，以本轮「## 输出格式」的字段说明与外置设定为准。' +
+  '不要写成多说话人剧本，也不要替在场其他角色写「名字：台词」。';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -152,19 +160,36 @@ function buildDetailMessages(messages, injected) {
 }
 
 /**
- * 收集游戏下发的全部纯文本 system 模块（此时尚未注入外置内容）。
- * 真实游戏会把设定拆成多条 system 消息，甚至与历史消息交错，因此必须全部处理。
+ * 收集需要请求重写的纯文本 system 模块（此时尚未注入外置内容）。
+ * 真实游戏会把设定拆成多条 system 消息，甚至与历史消息交错，因此必须逐条处理。
+ *
+ * 2026-11 游戏更新后，请求里还混有【相关经历】【人物关系】【任务接取】【任务交付】
+ * 【好感变化】【交情变化】【赠出礼物】【结交】等**已结算事实**模块。它们不是表演规则，
+ * 不能被外置设定删改（否则摘要器与游戏结算事实会自相矛盾），一律原样透传。
+ *
+ * 事实模块整条透传的前提是它只有事实块。若某天游戏把事实块与 `## 设定` 标题合并进同一条，
+ * 这里仍按事实模块透传（宁可少改也不改错事实），但会把它记进 mixed 让日志发出告警，
+ * 以便及时改成分段处理。
+ * @returns {{systems:Array<{index:number,content:string}>, skipped:number[], mixed:number[]}}
  */
 function collectGameSystemMessages(messages) {
-  if (!Array.isArray(messages)) return [];
   const out = [];
+  const skipped = [];
+  const mixed = [];
+  if (!Array.isArray(messages)) return { systems: out, skipped, mixed };
   for (let i = 0; i < messages.length; i += 1) {
     const m = messages[i];
     if (!m || m.role !== 'system' || typeof m.content !== 'string') continue;
     if (!m.content.trim()) continue;
+    if (isFactModule(m.content)) {
+      skipped.push(i);
+      // 含 `## ` 标题说明这条里还混着设定模块，透传会让那部分设定失去改写机会
+      if (/^[ \t]*##[ \t]/m.test(m.content)) mixed.push(i);
+      continue;
+    }
     out.push({ index: i, content: m.content });
   }
-  return out;
+  return { systems: out, skipped, mixed };
 }
 
 function tokenFields(tokens) {
@@ -1049,6 +1074,8 @@ export function createServer({ config, logger, getPortFallback = null }) {
     let rewriteInfo = null;
     let detailRewrite = null;
     let rewriteTokens = null;
+    // 原样透传、不参与重写的游戏事实模块数（任务/经历/关系/结算）
+    let rewriteSkippedFacts = 0;
 
     // 客户端断开时中止重写 / 配角调用，避免白白消耗 token
     const clientAc = new AbortController();
@@ -1255,9 +1282,13 @@ export function createServer({ config, logger, getPortFallback = null }) {
 
       // 2) 请求重写（实验性）：先改写游戏 system 与配角构造模块，再注入外置内容
       if (c.requestRewrite.enabled && (memoryText || promptsText)) {
-        const systems = collectGameSystemMessages(body.messages);
+        const { systems, skipped: factModules, mixed } = collectGameSystemMessages(body.messages);
+        if (factModules.length) rewriteSkippedFacts = factModules.length;
+        if (mixed.length) warnings.push('rewrite_skipped:mixed_fact_module');
         if (!systems.length) {
-          warnings.push('rewrite_skipped:no_text_system');
+          warnings.push(
+            factModules.length ? 'rewrite_skipped:only_fact_modules' : 'rewrite_skipped:no_text_system',
+          );
         } else {
           const extras = [];
           if (bCard) {
@@ -1296,6 +1327,8 @@ export function createServer({ config, logger, getPortFallback = null }) {
               savedTokens: rw.savedTokens || 0,
               cacheKey: rw.cache?.key || null,
               tokens: rw.tokens || null,
+              skippedFacts: rewriteSkippedFacts,
+              cachedModules: rw.cachedCount || 0,
               modules: rw.moduleCount,
               changedModules: rw.changedCount,
               repairedModules: rw.repairedCount,
@@ -1558,6 +1591,11 @@ export function createServer({ config, logger, getPortFallback = null }) {
             repairedCount: detailRewrite.repairedCount,
             failedCount: detailRewrite.failedCount,
             droppedCount: detailRewrite.droppedCount || 0,
+            // 命中模块级缓存的模块数；全部命中时 duration 只含解析/校验，不含上游
+            cachedModules: detailRewrite.cachedCount || 0,
+            requestedModules: detailRewrite.requestedModules ?? detailRewrite.moduleCount,
+            // 原样透传、未参与重写的游戏事实模块数（任务/经历/关系/结算）
+            skippedFacts: rewriteSkippedFacts,
             originalChars: detailRewrite.originalChars,
             rewrittenChars: detailRewrite.rewrittenChars,
             removedCount: detailRewrite.removedCount,
@@ -1578,7 +1616,8 @@ export function createServer({ config, logger, getPortFallback = null }) {
         injectorMode: castMode || 'head',
         filterAssistantText,
         wrapPlainContent,
-        repairReply: repairNpcReplyText,
+        // 传入当轮 system：截断回复也能按 `## 输出格式` 模板补齐字段，而不是只留 content。
+        repairReply: (text) => repairNpcReplyText(text, info.system),
       });
     } catch (err) {
       detail.error = err?.message || String(err);
@@ -1644,7 +1683,10 @@ export function createServer({ config, logger, getPortFallback = null }) {
     if (aImpersonated) warnings.push('cast_a_wrote_costar');
     // 非 JSON 回复：非流式会按当轮输出格式模板包回合法 JSON；流式只能记账
     if (plainWrapped) notes.push('reply_wrapped_json');
-    else if (!parsedA.jsonOk) warnings.push('reply_not_json');
+    else if (!parsedA.jsonOk) {
+      // 流式已经逐字节发出，无法回改；单独记账，便于区分「可修复」与「已发出去」。
+      warnings.push(result.isStream ? 'reply_not_json_stream' : 'reply_not_json');
+    }
     // 模型违约（双层 JSON / content 内裸引号 / 截断）已由本地修复
     if (result.repaired) warnings.push('reply_repaired');
 
@@ -1764,6 +1806,13 @@ export function createServer({ config, logger, getPortFallback = null }) {
         }
         state.turns = (state.turns || 0) + 1;
         state.lastGame = g;
+        // 新版游戏只在相关轮次下发【任务接取】【任务交付】【相关经历】。留下一份待消费副本，
+        // 让「这一轮没再下发同样内容」的摘要也能把它们写进长期记忆；摘要成功后清空。
+        {
+          const merged = mergePendingFacts(state.pendingFacts, g, { turn: state.turns, at: now });
+          if (merged) state.pendingFacts = merged;
+          else delete state.pendingFacts;
+        }
         state.rawNames = state.rawNames || [];
         if (info.rawName && !state.rawNames.includes(info.rawName)) state.rawNames.push(info.rawName);
         if (info.variant && !(state.variants || []).includes(info.variant)) {

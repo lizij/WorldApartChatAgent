@@ -19,6 +19,17 @@
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、
 注入字符数、外置提示词字符数、请求重写状态与额外 token、是否新建档、warnings、上游状态；回复非 JSON 时在 NPC 页标 ⚠。
 
+请求重写（`rewrite`）额外字段：
+
+- `skippedFacts`：原样透传、未参与重写的游戏事实模块数（`【相关经历】`/`【任务交付】`/`【好感变化】` 等）。
+- `cachedModules`：命中模块级缓存的模块数；`cacheHit` 只在**全部模块命中**时为 `true`。
+- `changedModules` / `repairedModules` / `failedModules` / `droppedModules`：改写/修复/失败/整模块删除数量。
+  `repairedModules` 不再把「补回枚举后与原文等价」的 noop 计入。
+- `warnings` 新增 `reply_not_json_stream`：流式回复不是合法 JSON（已逐字节发出，无法回改），
+  与非流式的 `reply_not_json` 区分；另有 `rewrite_skipped:mixed_fact_module`：某条消息把事实块
+  与 `## 设定` 混在一起，已整条透传（该设定本轮不会被改写）。
+- `notes` 的 `reply_wrapped_json`：非流式纯文本回复已按当轮模板包成 JSON（中性提示，不标红）。
+
 > **日志码与界面文案**：日志文件（`logs/YYYY-MM-DD.jsonl`）里 `kind` / `status` / `warnings` /
 > `rewrite.error` 一律写**英文码**（如 `cast_stage_cleared:idle`、`memory_over_limit:3266>3000`），
 > 便于 grep 与逐版本比对；管理页只负责翻译——中文说明在前，英文原码以小号灰字附在后面

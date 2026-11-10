@@ -12,15 +12,15 @@
 | `upstream.connectTimeoutMs/requestTimeoutMs` | 建立连接超时（默认 `15000`）/ 请求总超时兼流式空闲超时（默认 `300000`）。管理页「上游 Provider」可直接改，慢速 Provider（如 GLM）可调大；若游戏端自己先超时，调大这里无效 |
 | `memory.enabled` | 记忆总开关；关闭等同纯透传 |
 | `memory.injectMaxChars` | 注入长期记忆字符上限（默认 5600，= 记忆上限 + 200；比上限小会出现「写得进、注入不到」）。超出时**按分区优先级裁剪**：【赠予往来】→【同场】→【习惯与忌讳】→【经历与进度】→【未了之事】→【关系】→【身份与称呼】，身份与关系最后才动；裁剪只影响注入，不改磁盘文件 |
-| `memory.snapshotSystem` | system 内容变化时存档原文 |
+| `memory.snapshotSystem` | system 内容变化时存档原文。**只对设置类内容变化建档**：`【好感变化】`/`【赠出礼物】`/`【任务交付】` 等每轮结算事实不计入哈希，避免每轮都写一份 20KB+ 快照 |
 | `memory.summarizer.everyTurns` | 每多少轮异步压缩一次（默认 4） |
 | `memory.summarizer.idleFlushEnabled/idleFlushMs` | 空闲兜底：默认开；`idleFlushMs` 默认 5 分钟无请求即视为本段会话结束并补压（扫描周期固定 5 秒，不做配置项以免"改了不生效"） |
 | `memory.summarizer.recentEntries/maxMemoryChars/maxTokens/timeoutMs/overLimitRetries` | 单次最多消费的新对话条数（默认 60，**摘要窗口已按行号水位切片**，这只是异常保护上限）/ 记忆字数上限（5000）/ 摘要调用 max_tokens（4000）/ 超时（120s）/ 超限重试次数（2，0~3） |
 | `prompts.enabled` | 外置设定提示词总开关（默认 `true`）；关闭后全局与逐 NPC 提示都不注入 |
 | `prompts.global` | 全局提示词（对所有 NPC 生效，留空不注入；上限 4000 字）。逐 NPC 个人提示与「是否叠加全局」存于 `data/npcs/<slug>/prompt.json`。旧键 `style` 会在启动时自动迁移为 `prompts` |
-| `requestRewrite.enabled` | **实验性**请求重写总开关（默认 `false`）。每轮 NPC 对话额外调用一次上游，逐条改写**全部**游戏 system 模块；额外 token 消耗与首字延迟明显增加 |
+| `requestRewrite.enabled` | **实验性**请求重写总开关（默认 `false`）。每轮 NPC 对话额外调用一次上游，逐条改写**设定类** system 模块（世界观/场景/任务/输出格式等）；`【相关经历】`/`【人物关系】`/`【任务接取】`/`【任务交付】`/`【好感变化】` 等游戏事实模块**原样透传**。额外 token 消耗与首字延迟明显增加 |
 | `requestRewrite.maxTokens/timeoutMs/temperature` | 重写调用参数：输出上限 6000（按模块总字数自动上调，最高 20000）/ 超时 60s / 温度 0.2；内部调用恒定 `thinking:{type:"disabled"}` |
-| `requestRewrite.cache.mode/maxEntries/ttlDays` | 重写缓存机制（默认 `none` / 全局 1000 条 / 7 天）。`none` = 不启用；`exact` = **机制 1「整轮指纹缓存」**：最终请求体（全部 system 模块 + 记忆 + 提示词 + 模型参数 + 上游地址）逐字节相同时复用上次**已校验通过**的结果，`failed/partial` 不缓存。每个机制单独一个全局文件 `data/rewrite-cache-<mode>.json`；后续机制在 `REWRITE_CACHE_MODES` 登记。0.12.x 的布尔 `enabled` 启动时自动迁移为 `mode` |
+| `requestRewrite.cache.mode/maxEntries/ttlDays` | 重写缓存机制（默认 `none` / 全局 1000 条 / 7 天）。`none` = 不启用；`exact` = **机制 1「模块级指纹缓存」**：按**单个 system 模块**（模块原文 + NPC + 外置设定/记忆 + 模型参数 + 上游地址）复用上次**已校验通过**的草稿，只有变化的模块才送去重写，全部命中时不调用上游（token 记 0）；校验不过的模块/条目下次重试。每个机制单独一个全局文件 `data/rewrite-cache-<mode>.json`；后续机制在 `REWRITE_CACHE_MODES` 登记。0.12.x 的布尔 `enabled` 启动时自动迁移为 `mode`，0.13.x 的逐 NPC 整轮缓存启动时直接清理 |
 | `multiNpc.enabled` | **实验性**多 NPC 共演总开关（默认 `false`）。关闭时请求体与输出逐字节不变 |
 | `multiNpc.maxCoStars/maxCallsPerTurn` | 同场配角上限（默认 1）/ 一轮最多几次 NPC 发言调用（默认 2；1 = 只跑主角） |
 | `multiNpc.speakPolicy/outputStyle/allowASilence` | 配角开口策略 `addressed/always` / 多人输出格式 `script/inherit` / 允许主角只给在旁反应 |

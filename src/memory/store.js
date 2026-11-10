@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR } from '../config.js';
+import { stableSystemText } from '../identify.js';
 
 export const NPCS_DIR = path.join(DATA_DIR, 'npcs');
 
@@ -86,17 +87,24 @@ export function openNpc(slug, info = {}) {
   return { dir, stateFile, memoryFile, convFile, state, isNew };
 }
 
-/** system 原文快照：仅当内容哈希变化时存档（首见即存）。 */
+/**
+ * system 原文快照：仅当**设定本身**变化时存档（首见即存）。
+ *
+ * 2026-11 起游戏每轮都会带【好感变化】【赠出礼物】【任务交付】等结算模块，
+ * 它们一变就会让哈希变，导致每轮都写一份 20KB+ 快照。这里只对去掉事实模块后的
+ * 稳定文本做哈希；存档内容仍是完整原文（便于排查游戏侧变化）。
+ * 文件名精确到秒，避免同一分钟内多次变更互相覆盖。
+ */
 export function snapshotSystem(slug, systemText, state) {
   if (!systemText) return false;
-  const hash = crypto.createHash('sha256').update(systemText).digest('hex');
+  const hash = crypto.createHash('sha256').update(stableSystemText(systemText)).digest('hex');
   if (state.systemHash === hash) return false;
   const d = new Date();
   const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(
     d.getDate(),
   ).padStart(2, '0')}-${String(d.getHours()).padStart(2, '0')}${String(
     d.getMinutes(),
-  ).padStart(2, '0')}.md`;
+  ).padStart(2, '0')}${String(d.getSeconds()).padStart(2, '0')}.md`;
   const file = path.join(npcDir(slug), 'intake', name);
   fs.writeFileSync(
     file,

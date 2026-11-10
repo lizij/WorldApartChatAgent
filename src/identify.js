@@ -70,6 +70,169 @@ function section(text, title) {
 }
 
 /**
+ * 游戏侧的「事实/结算」模块标签。
+ *
+ * 2026-11 游戏更新后，请求里除设定模块外还会附上这些模块：检索到的经历、
+ * 关系网、任务接取/交付、好感/交情/赠礼/结交结算。它们是游戏已经算好的事实，
+ * 不属于可被外置设定改写的「表演规则」：
+ *   - 请求重写必须原样透传（见 requestRewrite 的 collect 过滤）；
+ *   - 系统快照的稳定性哈希要排除它们（否则每轮都判定「system 变了」）；
+ *   - 摘要器要把它们当「已确认事实」喂给模型（`## 过往要事` 在新版里已消失）。
+ */
+const FACT_LABELS = new Set([
+  '相关经历',
+  '人物关系',
+  '关系事实',
+  '角色属性',
+  '任务接取',
+  '任务交付',
+  '好感变化',
+  '交情变化',
+  '赠出礼物',
+  '结交',
+]);
+
+/** 首行是 `【事实标签】` 的模块视为游戏事实模块（原样透传，不参与重写）。 */
+export function isFactModule(text) {
+  const t = String(text || '').replace(/^\uFEFF/, '').trimStart();
+  const m = t.match(/^【([^】]{1,12})】/);
+  return !!(m && FACT_LABELS.has(m[1].trim()));
+}
+
+/**
+ * 按 `【标签】` 切开 system 文本里的游戏事实块。
+ * 只认行首的已知标签；`- 【NPC_GIFT｜…】` 这类行内标记会保留在所属块里。
+ * 遇到 `## ` 标题即结束当前块，避免把后面的设定模块内容误并进事实块。
+ * @returns {Record<string,string>}
+ */
+export function extractFactBlocks(sys) {
+  const blocks = {};
+  let cur = null;
+  for (const line of String(sys || '').replace(/\r\n/g, '\n').split('\n')) {
+    if (/^\s*##[ \t]/.test(line)) {
+      cur = null;
+      continue;
+    }
+    const m = line.match(/^【([^】]{1,12})】[ \t]*(.*)$/);
+    if (m && FACT_LABELS.has(m[1].trim())) {
+      cur = m[1].trim();
+      if (!blocks[cur]) blocks[cur] = [];
+      if (m[2].trim()) blocks[cur].push(m[2].trim());
+      continue;
+    }
+    if (cur) blocks[cur].push(line);
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(blocks)) {
+    const text = v.join('\n').trim();
+    if (text) out[k] = text;
+  }
+  return out;
+}
+
+function cap(text, max) {
+  const s = String(text || '').trim();
+  if (!s || s.length <= max) return s;
+  return s.slice(0, max).trim() + '…';
+}
+
+/** 新格式：任务接取/交付与相关经历就是原来的「过往要事」。 */
+function composePastEvents(blocks) {
+  const parts = [];
+  for (const key of ['任务接取', '任务交付', '相关经历']) {
+    if (blocks[key]) parts.push(`【${key}】\n${blocks[key]}`);
+  }
+  return parts.length ? cap(parts.join('\n'), 2000) : null;
+}
+
+/** 本轮结算事件（好感/交情/赠礼/结交），单行一条。 */
+function composeEvents(blocks) {
+  const parts = [];
+  for (const key of ['好感变化', '交情变化', '赠出礼物', '结交']) {
+    if (blocks[key]) parts.push(`【${key}】${blocks[key]}`);
+  }
+  return parts.length ? cap(parts.join('\n'), 600) : null;
+}
+
+/** 关系事实（只取明确条目，不取整段角色属性资料）。 */
+function composeRelations(blocks) {
+  if (!blocks['关系事实']) return null;
+  const lines = blocks['关系事实']
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('-'));
+  return lines.length ? cap(lines.join('\n'), 800) : null;
+}
+
+function joinFacts({ pastEvents, events, relations } = {}) {
+  const parts = [];
+  if (pastEvents) parts.push(String(pastEvents));
+  if (Array.isArray(events) && events.length) parts.push(`【本轮结算】\n${events.join('\n')}`);
+  else if (typeof events === 'string' && events) parts.push(`【本轮结算】\n${events}`);
+  if (relations) parts.push(`【关系事实】\n${relations}`);
+  return parts.join('\n\n').trim();
+}
+
+/** 把 state.lastGame 里保存的游戏事实拼成摘要器可用的紧凑文本。 */
+export function formatGameFacts(game) {
+  if (!game || typeof game !== 'object') return '';
+  return joinFacts(game);
+}
+
+/**
+ * 合并「待摘要消费的游戏事实」：
+ *  - pastEvents（任务接取/交付、相关经历）沿用最近一次非空值；
+ *  - events（好感/交情/赠礼/结交）按轮累积，避免只有最后一轮进记忆；
+ *  - relations（关系事实）取最近一次非空值。
+ * 摘要成功后由摘要器清空。
+ */
+export function mergePendingFacts(prev, game, meta = {}) {
+  const p = prev && typeof prev === 'object' ? prev : {};
+  const g = game && typeof game === 'object' ? game : {};
+  // 兼容旧结构 { text }
+  const prevEvents = Array.isArray(p.events) ? p.events : [];
+  const events = prevEvents.slice();
+  if (g.events && !events.includes(g.events)) events.push(g.events);
+  const merged = {
+    pastEvents: g.pastEvents || p.pastEvents || null,
+    events: events.slice(-12),
+    relations: g.relations || p.relations || null,
+    turn: meta.turn ?? p.turn ?? null,
+    at: meta.at || p.at || null,
+  };
+  return merged.pastEvents || merged.events.length || merged.relations ? merged : null;
+}
+
+/** pendingFacts 渲染成摘要器提示词里的文本。 */
+export function pendingFactsText(pending) {
+  if (!pending || typeof pending !== 'object') return '';
+  if (typeof pending.text === 'string' && pending.text.trim()) return pending.text.trim();
+  return joinFacts(pending);
+}
+
+/**
+ * 稳定 system 文本：去掉游戏事实模块，供快照哈希判断「设定本身有没有变」。
+ * 原文仍完整存档，这里只影响是否新建快照。
+ */
+export function stableSystemText(sys) {
+  const text = String(sys || '').replace(/\r\n/g, '\n');
+  const kept = [];
+  let dropping = false;
+  for (const line of text.split('\n')) {
+    const m = line.match(/^【([^】]{1,12})】/);
+    if (m && FACT_LABELS.has(m[1].trim())) {
+      dropping = true;
+      continue;
+    }
+    if (dropping && /^\s*##[ \t]/.test(line)) dropping = false;
+    else if (dropping && /^【/.test(line)) dropping = false;
+    if (dropping) continue;
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+/**
  * 用「角色背景」把 mod 全名校正回**原名**。
  *
  * 背景：游戏装了 mod 后 NPC 全名会变（不同 mod 全名不同，但**都包含原名**）。
@@ -130,8 +293,12 @@ export function extractGameState(sys) {
     return listed.length ? listed[listed.length - 1] : belongingsLines[belongingsLines.length - 1];
   })();
 
-  const past = section(sys, '过往要事');
-  s.pastEvents = past || null;
+  // 2026-11 游戏更新：`## 过往要事` 已移除，改为下发的【任务接取】【任务交付】
+  // 【相关经历】等事实模块。旧版仍按 `## 过往要事` 兜底。
+  const facts = extractFactBlocks(sys);
+  s.pastEvents = section(sys, '过往要事') || composePastEvents(facts);
+  s.events = composeEvents(facts);
+  s.relations = composeRelations(facts);
 
   // 对话对象（玩家）
   const player = {};

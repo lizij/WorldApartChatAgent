@@ -143,7 +143,7 @@
       <h2>请求重写 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
       <div class="kv">
         <label class="check"><input type="checkbox" id="rwEnabled" /> 启用请求重写（默认关闭）</label>
-        <p class="hint">启用后，每次 NPC 对话会先额外调用一次上游模型，<strong>逐条改写游戏下发的全部 system 模块</strong>（角色设定、场景、任务、输出格式等，真实请求通常有多条），删除或改写其中与本工具外置提示词／长期记忆冲突的部分，再生成回复。首字延迟与 token 消耗都会明显增加；重写失败或单个模块校验不通过时，该模块自动回退原文。</p>
+        <p class="hint">启用后，每次 NPC 对话会先额外调用一次上游模型，<strong>逐条改写游戏下发的设定类 system 模块</strong>（世界观、角色设定、场景、任务、输出格式等，真实请求通常有多条），删除或改写其中与本工具外置提示词／长期记忆冲突的部分，再生成回复。游戏已结算的事实模块（<code>【相关经历】</code>、<code>【人物关系】</code>、<code>【任务接取】</code>、<code>【任务交付】</code>、<code>【好感变化】</code>、<code>【赠出礼物】</code> 等）原样透传，不参与重写；<code>## 输出格式</code> 里的 JSON 结构始终逐字保留。首字延迟与 token 消耗都会明显增加；重写失败或单个模块校验不通过时，该模块自动回退原文。</p>
         <label>重写缓存机制</label>
         <div class="cache-modes" id="rwCacheModes"></div>
         <p class="hint" id="rwCacheModeHint"></p>

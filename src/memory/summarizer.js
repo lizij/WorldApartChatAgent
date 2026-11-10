@@ -15,6 +15,19 @@ import {
   MEMORY_SECTIONS,
   fitMemorySections,
 } from './store.js';
+import { formatGameFacts, pendingFactsText } from '../identify.js';
+
+/**
+ * 游戏侧事实（已确认事实）：
+ * 优先用 `state.pendingFacts` —— 最近一次非空的【任务接取】【任务交付】【相关经历】，
+ * 会跨轮保留到被摘要消费为止；否则退回本轮 `lastGame` 里解析出的事实。
+ * 新版游戏不再每轮重复下发同一段任务事实，只看当轮会漏掉交付/接取内容。
+ */
+function gameFactsOf(state) {
+  const pending = pendingFactsText(state && state.pendingFacts);
+  if (pending) return pending;
+  return formatGameFacts(state && state.lastGame);
+}
 
 /** 摘要器 system prompt；softChars 是给模型的目标字数，hardChars 是绝不允许超过的硬上限。 */
 function systemPrompt(softChars, hardChars) {
@@ -279,7 +292,7 @@ export class Summarizer {
       const userContent =
         `NPC：${slug}\n字数上限：${limit}\n\n` +
         `【已有记忆】\n${oldMemory || '（暂无）'}\n\n` +
-        `【本轮游戏侧摘要（如有，视为已确认事实）】\n${stateSnapshot?.lastGame?.pastEvents || '（无）'}\n\n` +
+        `【本轮游戏侧事实（如有，视为已确认事实）】\n${gameFactsOf(stateSnapshot) || '（无）'}\n\n` +
         (hasCast
           ? '【同场说明】\n材料中标注「同场他人」的句子是别人说的话与做的事，不是你自己的言行；\n' +
             '不要把别人的行为写进她的【赠予往来】【未了之事】；只把“在场是谁、什么关系”写进【同场】。\n\n'
@@ -338,6 +351,8 @@ export class Summarizer {
       fresh.lastSummaryTurn = fresh.turns || stateSnapshot.turns;
       // 水位只在本轮摘要成功后推进；失败时保持原值，下次重试同一段
       fresh.lastSummaryLine = Number.isFinite(nextLine) ? nextLine : totalLines;
+      // 游戏事实已随本次摘要并入记忆，清掉待消费标记，避免下次重复喂同一段
+      fresh.pendingFacts = null;
       saveState(bundle.stateFile, fresh);
 
       const usageComplete =

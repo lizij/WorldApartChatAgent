@@ -15,7 +15,7 @@ import { tokenUsage } from './upstream.js';
 import { rewriteCache } from './rewriteCache.js';
 
 /** 重写缓存协议版本：重写 prompt、校验规则或缓存结构变更时必须递增。 */
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 /** 同一 NPC + 同一请求体的并发重写只打一次上游。 */
 const inflight = new Map();
 
@@ -26,7 +26,13 @@ const SYSTEM_PROMPT = [
   '删改其中与外置设定、外置长期记忆冲突的描述。',
   '',
   '【优先级】外置设定 > 外置长期记忆 > 待处理 system 模块中的全部内容。',
-  '唯一例外：任何模块里出现的「## 输出格式」都是游戏解析回复的技术契约，必须逐字保留。',
+  '',
+  '【契约边界（重要）】',
+  '待处理模块里只有 `## 输出格式` 标题下的 **JSON 结构**（字段名、层级、枚举取值）',
+  '是游戏解析回复的技术契约，必须逐字保留。',
+  '该标题下的字段说明，以及同一模块里的「本轮会话状态」「本轮关系交互」',
+  '「先核对事实，再回应」「经历使用规则」「回应本轮诉求」等，都是普通行为规则；',
+  '它们与外置设定冲突时同样要删改。绝不要删除 `## 输出格式` 标题本身或其 JSON 结构。',
   '',
   '【配角模块的额外限制】',
   '1. 不得改动配角的**姓名与身份**（“姓名：X”“身份：…”这两行必须逐字保留）；',
@@ -48,7 +54,8 @@ const SYSTEM_PROMPT = [
   '   不同只是时间推移，不算冲突；只有外置设定明确要求，或记忆明确否定当前场景时才改写。',
   '3. 冲突时优先删除游戏侧的冲突句；若整节都在冲突，可连同标题删除整节。',
   '4. 无法判断是否冲突时，保留原文。',
-  '5. 任何模块中出现 `## 输出格式`，该节（标题、字段名、枚举取值、格式说明）必须逐字保留。',
+  '5. 任何模块中出现 `## 输出格式`，只逐字保留其 JSON 结构（字段名、层级、枚举取值）；',
+  '   该节的字段说明与模块内其余规则可按冲突删改。',
   '6. 模块之间不得搬运内容；每个模块独立处理，不得因为另一模块的要求而改写本模块。',
   '7. 只输出带标记的模块内容本身：不要解释、不要前言后语、不要 Markdown 代码围栏。',
 ].join('\n');
@@ -191,7 +198,8 @@ function repairFormat(originalText, draftText) {
   const schemaRestored = JSON.stringify(covered.value) === JSON.stringify(oa);
   if (schemaRestored && outsideSchema(originalText) === outsideSchema(draftText)) {
     // 草稿只是漏了枚举/字段，补回后与原模块等价：直接沿用原文，避免无意义改写。
-    return { ok: true, text: originalText, repaired: true, noop: true };
+    // 这不算「修复格式」——最终文本与原文完全一致，记 repaired 会让人以为每轮都在改。
+    return { ok: true, text: originalText, repaired: false, noop: true };
   }
   const semanticChanged = JSON.stringify(covered.value) !== JSON.stringify(ob);
   if (!semanticChanged) return { ok: true, text: draftText, repaired: false };
@@ -411,24 +419,8 @@ function clampInt(value, min, max, fallback) {
   return Math.min(Math.max(Math.floor(n), min), max);
 }
 
-/** 缓存键：最终发给上游的完整请求体 + 上游地址 + 缓存协议版本。 */
-function cacheKeyOf(slug, body, baseUrl) {
-  return crypto
-    .createHash('sha256')
-    .update(
-      JSON.stringify({
-        v: CACHE_VERSION,
-        slug,
-        baseUrl,
-        model: body.model,
-        temperature: body.temperature,
-        max_tokens: body.max_tokens,
-        stream: body.stream,
-        thinking: body.thinking,
-        messages: body.messages,
-      }),
-    )
-    .digest('hex');
+function sha(text) {
+  return crypto.createHash('sha256').update(String(text)).digest('hex');
 }
 
 export class RequestRewriter {
@@ -496,8 +488,72 @@ export class RequestRewriter {
     ];
     const totalChars = all.reduce((n, s) => n + normalize(s.content).length, 0);
 
-    const blocks = all.map(
-      (s, id) => `<<<SYSTEM id=${id}>>>\n${s.content}\n<<<END SYSTEM id=${id}>>>`,
+    // 多模块重写输出接近整个 system 的体量；按字符数估算下限，避免被 max_tokens 截断。
+    const configuredMax = Math.max(500, Number(c.maxTokens) || 6000);
+    const needed = Math.ceil(totalChars / 1.2) + 800;
+    const maxTokens = Math.min(Math.max(configuredMax, needed), 20000);
+    const timeoutMs = Math.max(1000, Number(c.timeoutMs) || 60000);
+    const temperature = Number.isFinite(Number(c.temperature)) ? Number(c.temperature) : 0.2;
+
+    // 缓存机制：当前只有 none / exact（机制 1，模块级指纹）。
+    // 键 = 模块原文 + NPC + 外置设定/记忆 + 上游地址与模型；因此只有「这一段设定」变了才 miss。
+    // 场景/任务每轮都在变，只命中同场景的连续轮次；世界观/输出格式这类静态模块在
+    // 外置记忆不变期间可连续复用（记忆一更新就全部 miss，这是为了不复用基于旧记忆的改写结果）。
+    const cacheCfg = c.cache || {};
+    const cacheMode = cacheCfg.mode === 'exact' ? 'exact' : 'none';
+    const cacheOn = !!slug && cacheMode === 'exact';
+    const maxEntries = clampInt(cacheCfg.maxEntries, 1, 10000, 1000);
+    const ttlMs = Math.max(0, Number(cacheCfg.ttlDays) || 0) * 86400000;
+    const baseUrl = upstreamChatUrl(up.baseUrl);
+    const promptsHash = sha(promptsText);
+    const memoryHash = sha(memoryText);
+    const moduleKeyOf = (content) =>
+      sha(
+        JSON.stringify({
+          v: CACHE_VERSION,
+          slug: slug || '',
+          baseUrl,
+          model: up.model,
+          temperature,
+          content,
+          prompts: promptsHash,
+          memory: memoryHash,
+        }),
+      );
+
+    const moduleKeys = all.map((s) => moduleKeyOf(normalize(s.content)));
+    const cachedChecks = new Map(); // id -> 校验后的结果 + 命中信息
+    const missIds = [];
+    for (let id = 0; id < all.length; id += 1) {
+      if (!cacheOn) {
+        missIds.push(id);
+        continue;
+      }
+      const hit = rewriteCache.get(cacheMode, moduleKeys[id], { ttlMs });
+      if (!hit || typeof hit.text !== 'string') {
+        missIds.push(id);
+        continue;
+      }
+      // 命中也要重新跑一遍校验，避免校验规则升级后复用旧结果。
+      const check =
+        all[id].group === 'cast'
+          ? validateExtra(all[id].content, hit.text, all[id].guard)
+          : validateModule(all[id].content, hit.text);
+      if (check.error) {
+        rewriteCache.delete(cacheMode, moduleKeys[id]);
+        missIds.push(id);
+        continue;
+      }
+      cachedChecks.set(id, {
+        check,
+        ageMs: Date.now() - (Number(hit.createdAt) || 0),
+        durationMs: Number(hit.durationMs) || 0,
+        tokens: Number(hit.savedTokens) || 0,
+      });
+    }
+
+    const blocks = missIds.map(
+      (id) => `<<<SYSTEM id=${id}>>>\n${all[id].content}\n<<<END SYSTEM id=${id}>>>`,
     );
 
     const messages = [
@@ -506,7 +562,7 @@ export class RequestRewriter {
         role: 'user',
         content: [
           `NPC：${slug || '（未知）'}`,
-          `待处理 system 模块数：${all.length}（游戏 ${list.length} + 构造 ${extraList.length}）`,
+          `待处理 system 模块数：${missIds.length}（共 ${all.length} 个；游戏 ${list.length} + 构造 ${extraList.length}，${cachedChecks.size} 个命中缓存）`,
           '',
           '【外置设定（最高优先级）】',
           promptsText || '（无）',
@@ -515,17 +571,10 @@ export class RequestRewriter {
           memoryText || '（无）',
           '',
           '【待处理 system 模块（逐条输出，保持 id 与顺序）】',
-          blocks.join('\n\n'),
+          blocks.join('\n\n') || '（本次没有需要重写的模块）',
         ].join('\n'),
       },
     ];
-
-    // 多模块重写输出接近整个 system 的体量；按字符数估算下限，避免被 max_tokens 截断。
-    const configuredMax = Math.max(500, Number(c.maxTokens) || 6000);
-    const needed = Math.ceil(totalChars / 1.2) + 800;
-    const maxTokens = Math.min(Math.max(configuredMax, needed), 20000);
-    const timeoutMs = Math.max(1000, Number(c.timeoutMs) || 60000);
-    const temperature = Number.isFinite(Number(c.temperature)) ? Number(c.temperature) : 0.2;
 
     const requestBody = {
       model: up.model,
@@ -536,36 +585,17 @@ export class RequestRewriter {
       messages,
     };
 
-    // 缓存机制：当前只有 none / exact（机制 1「整轮指纹缓存」）。
-    // 后续新增机制时在这里分派各自的 key / load / store 策略。
-    const cacheCfg = c.cache || {};
-    const cacheMode = cacheCfg.mode === 'exact' ? 'exact' : 'none';
-    const cacheOn = !!slug && cacheMode === 'exact';
-    const cacheKey = cacheOn ? cacheKeyOf(slug, requestBody, upstreamChatUrl(up.baseUrl)) : null;
-    const maxEntries = clampInt(cacheCfg.maxEntries, 1, 10000, 1000);
-    const ttlMs = Math.max(0, Number(cacheCfg.ttlDays) || 0) * 86400000;
-    const cached = cacheOn ? rewriteCache.get(cacheMode, cacheKey, { ttlMs }) : null;
-
     let raw = '';
     let usage = null;
     let upstreamMs = 0;
-    let cacheHit = false;
-    let cacheAgeMs = null;
+    const requestKey = missIds.length ? sha(JSON.stringify(requestBody)) : null;
 
-    if (cached) {
-      raw = cached.raw;
-      usage = cached.usage || null;
-      cacheHit = true;
-      cacheAgeMs = Date.now() - (Number(cached.createdAt) || 0);
-    } else {
-      const flightKey = cacheOn ? `${slug}|${cacheKey}` : null;
-      let flight = flightKey ? inflight.get(flightKey) : null;
+    if (missIds.length) {
+      let flight = inflight.get(requestKey);
       if (!flight) {
         flight = this.#fetch(requestBody, timeoutMs, signal);
-        if (flightKey) {
-          inflight.set(flightKey, flight);
-          flight.finally(() => inflight.delete(flightKey)).catch(() => {});
-        }
+        inflight.set(requestKey, flight);
+        flight.finally(() => inflight.delete(requestKey)).catch(() => {});
       }
       const result = await flight;
       raw = result.raw;
@@ -574,18 +604,30 @@ export class RequestRewriter {
     }
 
     const durationMs = Date.now() - started;
+    const fullHit = missIds.length === 0 && cachedChecks.size > 0;
+    const cacheAgeMs = fullHit
+      ? Math.min(...[...cachedChecks.values()].map((x) => x.ageMs))
+      : null;
+    const savedDurationMs = [...cachedChecks.values()].reduce((n, x) => n + x.durationMs, 0);
 
-    // 命中缓存时也重新解析、校验一遍，确保旧结果仍符合当前校验规则。
+    // 只在有 miss 时解析上游回复；全命中时 parsed 为空 map。
     {
-      const parsed = parseModules(stripFences(raw), new Set(all.map((_, id) => id)));
+      const parsed = missIds.length
+        ? parseModules(stripFences(raw), new Set(missIds))
+        : { map: new Map() };
       const items = all.map((s, id) => {
         const original = s.content;
+        const cached = cachedChecks.get(id);
         const parsedText = parsed.map?.get(id);
         let invalid = null;
         let candidate = original;
         let repaired = false;
         let dropped = false;
-        if (parsed.error) {
+        if (cached) {
+          candidate = cached.check.noop ? original : cached.check.text;
+          repaired = !!cached.check.repaired;
+          dropped = !!cached.check.dropped;
+        } else if (parsed.error) {
           invalid = parsed.error;
         } else if (parsedText == null) {
           invalid = 'rewrite_module_missing';
@@ -610,11 +652,13 @@ export class RequestRewriter {
           ok: !invalid,
           error: invalid || null,
           original,
-          draft: parsedText ?? null,
+          draft: parsedText ?? (cached ? cached.check.text : null),
           rewritten: effective,
           repaired,
           droppedModule: dropped && !invalid,
           changed: normalize(original) !== normalize(effective),
+          cached: !!cached,
+          cacheKey: moduleKeys[id],
           originalChars: original.length,
           rewrittenChars: effective.length,
           ...diff,
@@ -632,20 +676,35 @@ export class RequestRewriter {
           : okCount > 0
             ? 'partial'
             : 'failed';
-      const reply = items.map((x) => x.draft ?? x.rewritten).join('\n');
-      const tokens = tokenUsage({ usage, messages, reply });
+      const reply = items
+        .filter((x) => !x.cached)
+        .map((x) => x.draft ?? x.rewritten)
+        .join('\n');
+      // 全命中时没有上游调用：token 归零，真正省下的量放到 savedTokens。
+      const tokens = missIds.length ? tokenUsage({ usage, messages, reply }) : { total: 0, estimated: false };
 
-      // 只缓存完整成功的结果；failed / partial 下次重新尝试，避免把偶发失败固化。
-      if (cacheOn && !cacheHit && status === 'done') {
-        const entry = {
-          key: cacheKey,
-          createdAt: Date.now(),
-          durationMs: upstreamMs,
-          usage,
-          raw,
-        };
-        rewriteCache.set(cacheMode, cacheKey, entry, { maxEntries });
+      // 只缓存**已通过校验的单个模块**，且要求本次调用整体解析成功：
+      // 解析失败时保留原文，不把模型噪声固化进缓存；失败的模块下次自然重试。
+      if (cacheOn && missIds.length && !parsed.error) {
+        for (const item of items) {
+          if (item.cached || !item.ok || item.draft == null) continue;
+          rewriteCache.set(
+            cacheMode,
+            item.cacheKey,
+            {
+              key: item.cacheKey,
+              createdAt: Date.now(),
+              // 粗略摊分到模块：仅用于「省了多少」的展示，不代表单模块真实耗时。
+              durationMs: Math.round(upstreamMs / Math.max(1, missIds.length)),
+              savedTokens: Math.ceil((item.originalChars + item.rewrittenChars) / 1.4),
+              text: item.draft,
+            },
+            { maxEntries },
+          );
+        }
       }
+
+      const savedTokens = [...cachedChecks.values()].reduce((n, x) => n + x.tokens, 0);
 
       return {
         ok: status !== 'failed',
@@ -665,15 +724,17 @@ export class RequestRewriter {
         durationMs,
         usage,
         tokens,
-        cacheHit,
+        cachedCount: cachedChecks.size,
+        requestedModules: missIds.length,
+        cacheHit: fullHit,
         cacheAgeMs,
-        savedDurationMs: cacheHit ? Number(cached.durationMs) || 0 : 0,
-        savedTokens: cacheHit ? tokens.total ?? 0 : 0,
+        savedDurationMs,
+        savedTokens,
         cache: {
           mode: cacheMode,
           enabled: cacheOn,
-          hit: cacheHit,
-          key: cacheOn ? cacheKey.slice(0, 16) : null,
+          hit: fullHit,
+          key: requestKey ? requestKey.slice(0, 16) : null,
           entries: cacheOn ? rewriteCache.size(cacheMode) : 0,
         },
         messages,
