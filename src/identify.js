@@ -142,14 +142,25 @@ function composePastEvents(blocks) {
   for (const key of ['任务接取', '任务交付', '相关经历']) {
     if (blocks[key]) parts.push(`【${key}】\n${blocks[key]}`);
   }
-  return parts.length ? cap(parts.join('\n'), 2000) : null;
+  return parts.length ? cap(parts.join('\n'), 2400) : null;
 }
 
-/** 本轮结算事件（好感/交情/赠礼/结交），单行一条。 */
+/**
+ * 本轮结算事件（好感/交情/赠礼/结交），单行一条、每行都带标签。
+ *
+ * 同一标签在一轮里可能出现多次（实测一轮两条【好感变化】、两条【赠出礼物】），
+ * `extractFactBlocks` 会把同名标签合并成一个字符串，所以这里必须**逐行**补标签，
+ * 否则第二条会丢掉「【好感变化】」，喂给摘要器就成了无主句。
+ */
 function composeEvents(blocks) {
   const parts = [];
   for (const key of ['好感变化', '交情变化', '赠出礼物', '结交']) {
-    if (blocks[key]) parts.push(`【${key}】${blocks[key]}`);
+    const block = blocks[key];
+    if (!block) continue;
+    for (const line of block.split('\n')) {
+      const t = line.trim();
+      if (t) parts.push(`【${key}】${t}`);
+    }
   }
   return parts.length ? cap(parts.join('\n'), 600) : null;
 }
@@ -186,16 +197,47 @@ export function formatGameFacts(game) {
  *  - relations（关系事实）取最近一次非空值。
  * 摘要成功后由摘要器清空。
  */
+/**
+ * 把结算事件归一成「一行一条、每行都带标签」。
+ *
+ * 0.17.0 把 events 存成一个字符串，且同名标签只补一次（第二条起无标签），
+ * 升级后旧 state 里的这类行会原样读出来；新写入又是带标签的，两者字符串不相等，
+ * 去重就会失效 → 同一条好感/赠礼在摘要里出现两次。
+ * 这里按「上一个标签」给无标签行补回前缀，让新旧格式能正确合并。
+ */
+function normalizeEventLines(value) {
+  const labelRe = /^【(好感变化|交情变化|赠出礼物|结交)】/;
+  const out = [];
+  let cur = null;
+  for (const chunk of Array.isArray(value) ? value : value ? [value] : []) {
+    for (const line of String(chunk).split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const m = t.match(labelRe);
+      if (m) {
+        cur = m[1];
+        out.push(t);
+        continue;
+      }
+      // 认不出标签就原样保留；能接上上一个标签就补齐（兼容 0.17.0 的旧格式）
+      out.push(cur ? `【${cur}】${t}` : t);
+    }
+  }
+  return out;
+}
+
 export function mergePendingFacts(prev, game, meta = {}) {
   const p = prev && typeof prev === 'object' ? prev : {};
   const g = game && typeof game === 'object' ? game : {};
-  // 兼容旧结构 { text }
-  const prevEvents = Array.isArray(p.events) ? p.events : [];
-  const events = prevEvents.slice();
-  if (g.events && !events.includes(g.events)) events.push(g.events);
+  // 事件统一按「一行一条、每行带标签」存，便于去重与截断
+  const events = normalizeEventLines(p.events);
+  for (const line of normalizeEventLines(g.events)) {
+    if (!events.includes(line)) events.push(line);
+  }
   const merged = {
     pastEvents: g.pastEvents || p.pastEvents || null,
-    events: events.slice(-12),
+    // 只留最近 16 条结算事件；更早的多半已并入记忆或被后一轮覆盖
+    events: events.slice(-16),
     relations: g.relations || p.relations || null,
     turn: meta.turn ?? p.turn ?? null,
     at: meta.at || p.at || null,

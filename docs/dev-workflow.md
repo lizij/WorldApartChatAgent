@@ -81,9 +81,15 @@
 2. [scripts/build-backend.mjs](../scripts/build-backend.mjs) 用 esbuild 把 `src/app.js` 打成单文件
    `dist/backend.cjs`（CJS，供 asar 内加载）；
 3. electron-builder 出 `releases/WorldApartNpcAgent-<version>-win-portable.exe`（x64，未签名）；
-4. 恢复两个数据目录并逐文件大小校验，然后清理 `win-unpacked`、`.blockmap`、`latest.yml` 等中间产物。
+4. **只补回缺失文件**、不覆盖已有文件地恢复两个数据目录（打包时程序通常还在跑，运行期写入的
+   日志/state/intake 必须保留），再校验「备份里没有缺失」，最后清理 `win-unpacked`、`.blockmap`、
+   `latest.yml` 等中间产物。
 
 注意事项：
+
+- **不要在程序运行时打包**（虽然 0.17.1 起恢复逻辑已不会覆盖新写入，但关掉更稳妥）：
+  0.17.0 出包时就踩过——旧逻辑用备份覆盖回去，把构建窗口里写入的一轮对话日志、会话记录与
+  `state.json` 回滚掉了，只剩多出来的 intake 快照，属于静默丢数据。
 
 - **国内网络 / 沙箱环境必须先设镜像变量**，否则打包阶段连 GitHub 超时（缺 `ELECTRON_MIRROR` 时
   electron 本体仍走 GitHub，最容易漏）：
