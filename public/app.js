@@ -181,6 +181,10 @@ async function loadConfig() {
   $('#ttsDefaultGender').value = tts.defaultGender === 'male' ? 'male' : 'female';
   updateTtsSkipVisibility();
   initTtsPlayer(tts);
+  // 引擎相关：只回填配置值，**不要**在这里枚举系统语音
+  // （枚举要起一次 PowerShell 约 0.4s，放到切到「实验功能」页时再做）
+  $('#ttsEngine').value = tts.engine === 'kokoro' ? 'kokoro' : 'windows';
+  syncEngineOptions();
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -520,6 +524,16 @@ $('#saveTts')?.addEventListener('click', async () => {
   const female = $('#ttsVoiceFemale')?.value || '';
   if (male) ttsPatch.voices = { ...(ttsPatch.voices || {}), male };
   if (female) ttsPatch.voices = { ...(ttsPatch.voices || {}), female };
+  // Kokoro 音色
+  if (ttsKokoro.installed) {
+    const kf = $('#ttsKokoroFemale')?.value;
+    const km = $('#ttsKokoroMale')?.value;
+    ttsPatch.kokoro = {};
+    if (kf) ttsPatch.kokoro.voiceFemale = kf;
+    if (km) ttsPatch.kokoro.voiceMale = km;
+  }
+  const engine = $('#ttsEngine')?.value;
+  if (engine) ttsPatch.engine = engine;
 
   await api('/api/config', {
     method: 'PUT',
@@ -536,15 +550,23 @@ $('#saveTts')?.addEventListener('click', async () => {
 });
 
 async function ttsPreview(gender) {
-  setTtsStatus('合成中…');
+  const engine = ttsKokoro.installed && $('#ttsEngine')?.value === 'kokoro' ? 'kokoro' : 'windows';
+  setTtsStatus(engine === 'kokoro' ? 'Kokoro 合成中…（首次较慢）' : '合成中…');
   try {
     // 必须把下拉框里当前选中的音色一起发过去，否则换音色也听不出区别
-    const sel = gender === 'male' ? $('#ttsVoiceMale') : $('#ttsVoiceFemale');
-    const voice = sel && sel.value ? sel.value : null;
+    let voice = null;
+    if (engine === 'kokoro') {
+      const selK = gender === 'male' ? $('#ttsKokoroMale') : $('#ttsKokoroFemale');
+      voice = selK && selK.value ? selK.value : null;
+    } else {
+      const sel = gender === 'male' ? $('#ttsVoiceMale') : $('#ttsVoiceFemale');
+      voice = sel && sel.value ? sel.value : null;
+    }
     const r = await fetch('/api/tts/preview', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
+        engine,
         gender,
         voice,
         rate: Number($('#ttsRate').value),
@@ -577,8 +599,8 @@ $('#ttsPreviewMale')?.addEventListener('click', () => ttsPreview('male'));
 $('#ttsPreviewFemale')?.addEventListener('click', () => ttsPreview('female'));
 $('#ttsRefreshVoices')?.addEventListener('click', async () => {
   setTtsStatus('重新检测系统语音…');
-  await loadTtsVoices(true);
-  setTtsStatus('已重新检测（共 ' + ($('#ttsVoiceMale')?.options?.length || 0) + ' 个语音）');
+  await loadTtsEngines(true);
+  setTtsStatus('已重新检测（共 ' + ($('#ttsVoiceMale')?.options?.length || 0) + ' 个系统语音）');
 });
 $('#ttsStop')?.addEventListener('click', () => {
   ttsQueue.length = 0;
@@ -588,16 +610,48 @@ $('#ttsStop')?.addEventListener('click', () => {
 
 /** 打开实验功能页时才枚举系统语音（要起一次 PowerShell，约 0.4s）。 */
 let ttsVoicesLoaded = false;
-async function loadTtsVoices(force = false) {
-  if (ttsVoicesLoaded && !force) return;
-  const maleSel = $('#ttsVoiceMale');
-  const femaleSel = $('#ttsVoiceFemale');
+let ttsKokoro = { installed: false, voices: [], downloadBytes: 0, bytes: 0 };
+let ttsInstallTimer = null;
+
+/** 只按已知状态刷新「当前引擎」下拉的文案。
+ * 不 disable 选项：当前配置可能已经是 kokoro，禁用已选项会造成怪状态；
+ * 未安装时点选会被 change 处理器拦下并回退。 */
+function syncEngineOptions() {
+  const sel = $('#ttsEngine');
+  if (!sel) return;
+  const opt = [...sel.options].find((o) => o.value === 'kokoro');
+  if (!opt) return;
+  opt.textContent = ttsKokoro.installed ? 'Kokoro 神经语音（已安装）' : 'Kokoro 神经语音（需下载约 162 MB）';
+}
+
+/** 读取引擎状态与 Kokoro 音色清单，刷新界面。 */
+async function loadTtsEngines(force = false) {
   try {
     const d = await api('/api/tts/voices' + (force ? '?refresh=1' : ''));
     ttsVoicesLoaded = true;
+
+    // 系统语音
     const voices = d.voices || [];
-    renderVoiceOptions(maleSel, voices, d.suggested?.male, 'male');
-    renderVoiceOptions(femaleSel, voices, d.suggested?.female, 'female');
+    renderVoiceOptions($('#ttsVoiceMale'), voices, d.suggested?.male, 'male');
+    renderVoiceOptions($('#ttsVoiceFemale'), voices, d.suggested?.female, 'female');
+
+    // Kokoro
+    const k = d.engines?.kokoro || {};
+    ttsKokoro = {
+      installed: !!k.installed,
+      voices: k.voices || [],
+      downloadBytes: k.downloadBytes || 0,
+      bytes: k.bytes || 0,
+    };
+    if (ttsKokoro.downloadBytes) {
+      const dlMb = Math.round(ttsKokoro.downloadBytes / 1048576);
+      if ($('#ttsKokoroSize')) $('#ttsKokoroSize').textContent = `约 ${dlMb} MB`;
+      if ($('#ttsInstall')) $('#ttsInstall').textContent = `下载并安装 Kokoro（约 ${dlMb} MB）`;
+    }
+    syncEngineOptions();
+    renderKokoroVoices();
+    renderKokoroState(k.state);
+
     const notice = $('#ttsNotice');
     if (notice) {
       if (!d.ok) {
@@ -609,16 +663,145 @@ async function loadTtsVoices(force = false) {
       }
     }
   } catch (err) {
-    // 读不到语音清单时至少给出可选项为空的下拉，避免 select 显示空白
-    renderVoiceOptions(maleSel, [], null, 'male');
-    renderVoiceOptions(femaleSel, [], null, 'female');
     const notice = $('#ttsNotice');
     if (notice) {
       notice.hidden = false;
-      notice.textContent = '读取系统语音失败：' + String(err.message || err);
+      notice.textContent = '读取语音引擎失败：' + String(err.message || err);
     }
   }
 }
+
+function renderKokoroVoices() {
+  const box = $('#ttsKokoroVoices');
+  if (!box) return;
+  box.hidden = !ttsKokoro.installed;
+  if (!ttsKokoro.installed) return;
+  for (const [selId, gender, cfgKey] of [
+    ['#ttsKokoroFemale', 'female', 'voiceFemale'],
+    ['#ttsKokoroMale', 'male', 'voiceMale'],
+  ]) {
+    const sel = $(selId);
+    if (!sel) continue;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const v of ttsKokoro.voices.filter((x) => x.gender === gender)) {
+      const o = document.createElement('option');
+      o.value = v.name;
+      o.textContent = v.label;
+      sel.appendChild(o);
+    }
+    if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  }
+}
+
+function renderKokoroState(state) {
+  const statusEl = $('#ttsKokoroStatus');
+  const installRow = $('#ttsInstallRow');
+  const progEl = $('#ttsInstallProgress');
+  const hintEl = $('#ttsEngineHint');
+  if (!statusEl) return;
+
+  // 音色下拉的可见性跟随安装状态，避免残留上一轮的状态
+  renderKokoroVoices();
+
+  const running = !!state?.running;
+  if (ttsKokoro.installed) {
+    // 已安装显示**实际占用**（159 MB），不是下载量（162 MB，含已删除的压缩包）
+    const mb = Math.round((ttsKokoro.bytes || 0) / 1048576);
+    statusEl.value = mb ? `已安装（占用 ${mb} MB）` : '已安装';
+    if (installRow) installRow.hidden = true;
+    if (progEl) progEl.hidden = true;
+    if (hintEl) hintEl.textContent = '提示：Kokoro 合成比播放慢，长句会先等一段时间才出声；短句体验更好。';
+  } else if (running) {
+    statusEl.value = '下载中…';
+    if (installRow) installRow.hidden = true;
+    if (progEl) progEl.hidden = false;
+    paintProgress(state);
+  } else {
+    statusEl.value = state?.error ? '安装失败' : '未安装';
+    if (installRow) installRow.hidden = false;
+    if (progEl) progEl.hidden = true;
+    if (hintEl) hintEl.textContent = state?.error ? '上次安装失败：' + state.error : '';
+    // 失败后清掉进度条残留，避免下次显示上一次的百分比
+    if (progEl && state?.error) {
+      const fill = $('#ttsBarFill');
+      if (fill) fill.style.width = '0%';
+    }
+  }
+}
+
+function paintProgress(state) {
+  const total = Number(state?.totalBytes) || 1;
+  const done = Number(state?.doneBytes) || 0;
+  const pct = Math.min(100, Math.round((done / total) * 100));
+  const fill = $('#ttsBarFill');
+  if (fill) fill.style.width = pct + '%';
+  const detail = $('#ttsInstallDetail');
+  if (detail) {
+    const speed = Number(state?.speedBps) || 0;
+    const speedTxt = speed > 0 ? (speed / 1048576).toFixed(2) + ' MB/s' : '—';
+    const left = speed > 0 ? Math.max(1, Math.round((total - done) / speed)) : 0;
+    detail.textContent = `${state?.step || '准备中'} · ${pct}% (${(done / 1048576).toFixed(0)}/${(total / 1048576).toFixed(0)} MB) · ${speedTxt}${left ? ' · 剩余约 ' + left + ' 秒' : ''}`;
+  }
+}
+
+/** 轮询安装进度。 */
+function pollInstall() {
+  if (ttsInstallTimer) return;
+  ttsInstallTimer = setInterval(async () => {
+    try {
+      const s = await api('/api/tts/install');
+      renderKokoroState(s.state);
+      if (!s.state?.running) {
+        clearInterval(ttsInstallTimer);
+        ttsInstallTimer = null;
+        if (s.installed) {
+          await loadTtsEngines(true);
+          setTtsStatus('Kokoro 已安装，可在上方切换到它');
+        } else if (s.state?.error) {
+          setTtsStatus('安装失败：' + s.state.error, true);
+        }
+      }
+    } catch {
+      clearInterval(ttsInstallTimer);
+      ttsInstallTimer = null;
+    }
+  }, 800);
+}
+
+$('#ttsInstall')?.addEventListener('click', async () => {
+  $('#ttsInstallMsg').textContent = '正在启动下载…';
+  try {
+    await api('/api/tts/install', { method: 'POST' });
+    $('#ttsInstallMsg').textContent = '';
+    renderKokoroState({ running: true, doneBytes: 0, totalBytes: ttsKokoro.downloadBytes || 1, step: '准备中' });
+    pollInstall();
+  } catch (err) {
+    $('#ttsInstallMsg').textContent = '启动失败：' + String(err.message || err);
+  }
+});
+
+$('#ttsEngine')?.addEventListener('change', async () => {
+  const want = $('#ttsEngine').value;
+  if (want === 'kokoro' && !ttsKokoro.installed) {
+    setTtsStatus('请先下载 Kokoro 引擎', true);
+    $('#ttsEngine').value = 'windows';
+    return;
+  }
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tts: { engine: want } }),
+    });
+    setTtsStatus(want === 'kokoro' ? '已切换到 Kokoro（合成较慢，请耐心等待）' : '已切换到 Windows 内置语音');
+    loadConfig();
+  } catch (err) {
+    setTtsStatus('切换失败：' + String(err.message || err), true);
+    loadConfig();
+  }
+});
+
 
 /** 填充性别下拉：优先用当前配置，其次同性别第一个，最后任意一个。 */
 function renderVoiceOptions(sel, voices, current, gender) {
@@ -668,7 +851,7 @@ function activateTab(name, { remember = true } = {}) {
   const pane = $('#tab-' + key);
   if (pane) pane.classList.add('active');
   if (key === 'npcs') loadNpcs();
-  if (key === 'labs') loadTtsVoices();
+  if (key === 'labs') loadTtsEngines();
   if (!remember) return;
   try {
     localStorage.setItem(TAB_KEY, key);
@@ -804,13 +987,21 @@ const ERROR_TEXT_LABELS = {
   cast_actor_failed: '配角请求失败',
   summary_failed: '记忆压缩失败',
   tts_no_voice: '系统里没有可用的中文语音，请在 Windows 设置里添加',
-  tts_timeout: '语音合成超时（20 秒）',
+  tts_timeout: '语音合成超时（系统语音 20 秒 / Kokoro 180 秒）',
   tts_powershell_failed: '调用系统语音失败（可能被安全策略拦截）',
   tts_empty_text: '这条回复里没有可朗读的文字',
   tts_empty_audio: '系统语音返回了空音频（文本可能全是符号）',
   tts_stopping: '程序正在退出，已跳过朗读',
   not_plain_text: '回复里没有可朗读的纯文本',
   empty_text: '这条回复里没有可朗读的文字',
+  // Kokoro 引擎
+  kokoro_failed: 'Kokoro 合成失败（已自动回退系统语音）',
+  kokoro_not_installed: 'Kokoro 引擎尚未安装，已回退系统语音',
+  engine_not_installed: '这个语音引擎还没安装，请先在「实验功能」里下载',
+  checksum_mismatch: '下载的文件校验不通过（已删除，可重试）',
+  incomplete_after_install: '安装不完整，请重试',
+  already_running: '已经在下载中了',
+  download_failed: '下载失败（网络或镜像不可用）',
 };
 
 function kindLabel(kind) {
@@ -1308,9 +1499,12 @@ function renderLog(rec) {
       <div class="log-meta">${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
   } else if (rec.kind === 'tts') {
     // 成功的朗读只落盘、不进界面；能走到这里的只有失败，所以按异常渲染
-    const what = rec.action === 'preview' ? '试听' : '朗读';
+    const what = rec.action === 'preview' ? '试听' : rec.action === 'install' ? '引擎安装' : '朗读';
+    const engineTag = rec.engine === 'kokoro' ? 'Kokoro' : rec.engine === 'windows' ? 'Windows 语音' : '';
     body = `<div class="log-line warn">${esc(rec.slug || '')} ${what}失败</div>
       <div class="log-meta">
+        ${engineTag ? `<span>${esc(engineTag)}</span>` : ''}
+        ${rec.engineFallback ? `<span class="warn">已回退到系统语音（${esc(rec.engineFallback)}）</span>` : ''}
         ${rec.voice ? `<span>${esc(rec.voice)}</span>` : ''}
         ${rec.chars != null ? `<span>${rec.chars} 字</span>` : ''}
         ${
@@ -1469,6 +1663,8 @@ async function loadNpcs() {
 
 async function loadNpcDetail(slug, name) {
   const d = await api('/api/npcs/' + encodeURIComponent(slug));
+  // Kokoro 音色清单（未安装时为空，详情里就不显示这个下拉）
+  const kokoroVoiceOptions = d.engine === 'kokoro' && ttsKokoro.voices.length ? ttsKokoro.voices : null;
   const g = d.state?.lastGame || {};
   const st = d.prompt || { useGlobal: true, text: '' };
   const hasDraft = !!draftState && draftState.slug === slug;
@@ -1529,7 +1725,8 @@ async function loadNpcDetail(slug, name) {
     <textarea id="npcAliases" rows="3" placeholder="例如：梦儿&#10;小弦娘">${esc((d.aliases || []).join('\n'))}</textarea>
     <div class="act-row"><button class="btn primary sm" id="saveAliases">保存别名</button><span class="saved-hint" id="aliasSaved"></span></div>
     <h4>语音朗读（本 NPC）</h4>
-    <p class="hint">当前音色：<strong>${esc(d.voiceResolved?.voiceName || '未检测到系统语音')}</strong>
+    <p class="hint">当前引擎：<strong>${esc(d.engine === 'kokoro' ? 'Kokoro 神经语音' : 'Windows 内置语音')}</strong>
+      · 当前音色：<strong>${esc(d.voiceResolved?.voiceLabel || d.voiceResolved?.voiceName || '未检测到系统语音')}</strong>
       （${d.voiceResolved?.gender === 'male' ? '男声' : '女声'}）· 判定依据：${esc(d.voiceResolved?.reason || '')}</p>
     <label class="check small"><input type="checkbox" id="npcVoiceEnabled" ${d.voice?.enabled !== false ? 'checked' : ''} /> 参与自动朗读（取消勾选即静音；手动点 ▶ 仍可播）</label>
     <div class="grid three advanced">
@@ -1541,6 +1738,18 @@ async function loadNpcDetail(slug, name) {
       <label>语速（留空跟全局）<input type="number" id="npcVoiceRate" min="0.5" max="3" step="0.05" value="${d.voice?.rate ?? ''}" placeholder="跟随全局" /></label>
       <label>音调（留空跟全局）<input type="number" id="npcVoicePitch" min="0.5" max="2" step="0.05" value="${d.voice?.pitch ?? ''}" placeholder="跟随全局" /></label>
     </div>
+    ${
+      d.engine === 'kokoro'
+        ? `<label>Kokoro 专属音色（留空按上面的性别自动选）
+            <select id="npcVoiceKokoro">
+              <option value="">跟随性别</option>
+              ${(kokoroVoiceOptions || [])
+                .map((v) => `<option value="${esc(v.name)}" ${d.voice?.voice === v.name ? 'selected' : ''}>${esc(v.label)}</option>`)
+                .join('')}
+            </select>
+          </label>`
+        : ''
+    }
     <div class="act-row">
       <button class="btn primary sm" id="saveNpcVoice">保存语音设置</button>
       <button class="btn sm" id="previewNpcVoice">试听本 NPC</button>
@@ -1603,16 +1812,19 @@ async function loadNpcDetail(slug, name) {
     const rateRaw = $('#npcVoiceRate').value.trim();
     const pitchRaw = $('#npcVoicePitch').value.trim();
     try {
+      const raw = {
+        enabled: $('#npcVoiceEnabled').checked,
+        gender: $('#npcVoiceGender').value,
+        // 空串 = 跟随全局：传 null 让服务端清掉覆盖
+        rate: rateRaw === '' ? null : Number(rateRaw),
+        pitch: pitchRaw === '' ? null : Number(pitchRaw),
+      };
+      const kokoroSel = $('#npcVoiceKokoro');
+      if (kokoroSel) raw.voice = kokoroSel.value || '';
       await api('/api/npcs/' + encodeURIComponent(slug) + '/voice', {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          enabled: $('#npcVoiceEnabled').checked,
-          gender: $('#npcVoiceGender').value,
-          // 空串 = 跟随全局：传 null 让服务端清掉覆盖
-          rate: rateRaw === '' ? null : Number(rateRaw),
-          pitch: pitchRaw === '' ? null : Number(pitchRaw),
-        }),
+        body: JSON.stringify(raw),
       });
       loadNpcs();
       // 先重渲染详情（会重建提示元素），再写「已保存」，否则提示会被新元素覆盖掉
@@ -1628,16 +1840,24 @@ async function loadNpcDetail(slug, name) {
     const gender = $('#npcVoiceGender').value;
     const isAuto = gender === 'auto';
     const resolved = isAuto ? d.voiceResolved?.gender || 'female' : gender;
-    // 自动判定时用该 NPC 实际解析出的音色；手动指定时按性别取全局音色
-    const voice = isAuto ? d.voiceResolved?.voiceName || null : null;
+    const engine = d.engine === 'kokoro' ? 'kokoro' : 'windows';
+    // Kokoro：优先用本 NPC 指定的音色，否则用当前解析结果
+    const kokoroSel = $('#npcVoiceKokoro');
+    const voice =
+      engine === 'kokoro'
+        ? (kokoroSel && kokoroSel.value) || d.voiceResolved?.voiceName || null
+        : isAuto
+          ? d.voiceResolved?.voiceName || null
+          : null;
     const rateRaw = $('#npcVoiceRate').value.trim();
     const pitchRaw = $('#npcVoicePitch').value.trim();
-    setTtsStatus('合成中…');
+    setTtsStatus(engine === 'kokoro' ? 'Kokoro 合成中…（首次较慢）' : '合成中…');
     try {
       const r = await fetch('/api/tts/preview', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
+          engine,
           gender: resolved,
           voice,
           ...(rateRaw === '' ? {} : { rate: Number(rateRaw) }),
@@ -1652,7 +1872,7 @@ async function loadNpcDetail(slug, name) {
       ttsPlaying = { rid: null, objectUrl: url };
       audio.src = url;
       await audio.play();
-      setTtsStatus('试听：' + (voice || (resolved === 'male' ? '男声' : '女声')));
+      setTtsStatus('试听：' + (d.voiceResolved?.voiceLabel || voice || (resolved === 'male' ? '男声' : '女声')));
     } catch (err) {
       setTtsStatus('试听失败：' + String(err.message || err), true);
     }

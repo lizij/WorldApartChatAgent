@@ -80,7 +80,7 @@ export function invalidateVoiceCache() {
 
 // —— 逐 NPC 设置 ——
 
-const DEFAULT_VOICE = { enabled: true, gender: 'auto', rate: null, pitch: null };
+const DEFAULT_VOICE = { enabled: true, gender: 'auto', rate: null, pitch: null, voice: '' };
 
 function voiceFile(slug) {
   return path.join(NPCS_DIR, slug, 'voice.json');
@@ -106,6 +106,8 @@ export function readVoice(slug) {
     gender: raw.gender === 'male' || raw.gender === 'female' ? raw.gender : 'auto',
     rate: numOrNull(raw.rate),
     pitch: numOrNull(raw.pitch),
+    // Kokoro 专用：具体音色名（zf_xiaoxiao 等）；留空则按 gender 取全局默认
+    voice: typeof raw.voice === 'string' ? raw.voice.trim().slice(0, 40) : '',
   };
 }
 
@@ -122,12 +124,16 @@ export function saveVoice(slug, patch = {}) {
     const v = numOrNull(patch.pitch);
     next.pitch = v === null ? null : Math.round(Math.min(Math.max(v, 0.5), 2) * 100) / 100;
   }
+  if (patch.voice !== undefined) {
+    next.voice = typeof patch.voice === 'string' ? patch.voice.trim().slice(0, 40) : '';
+  }
   // 全默认值时不落盘，保持目录干净
   const isDefault =
     next.enabled === DEFAULT_VOICE.enabled &&
     next.gender === DEFAULT_VOICE.gender &&
     next.rate == null &&
-    next.pitch == null;
+    next.pitch == null &&
+    !next.voice;
   const file = voiceFile(slug);
   if (isDefault) {
     try {

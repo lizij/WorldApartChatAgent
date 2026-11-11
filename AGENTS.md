@@ -179,7 +179,9 @@ WorldApartProject/
 ├─ electron/main.cjs          # Electron 主进程：起后端、开窗、单实例、关窗即退、便携 data/ 或 data_test/
 ├─ scripts/
 │  ├─ build-backend.mjs       # esbuild: src/app.js → dist/backend.cjs（asar 内 CJS 单文件）
-│  └─ dist.mjs                # portable 打包包装（备份/恢复 releases/data 与 data_test）
+│  └─ dist.mjs                # portable 打包包装（备份/恢复 releases/data 与 data_test；同步 tts-engines）
+├─ tts-engines/               # 预置语音引擎（约 159MB，**入库**）；出包同步到 releases/，工坊发布一并携带
+├─ workshop/                  # Steam 工坊发布（整个目录 gitignore）
 ├─ public/                    # 管理页（原生 HTML/CSS/JS，无框架）
 │  ├─ index.html  ├─ app.js  └─ style.css
 ├─ src/
@@ -199,11 +201,14 @@ WorldApartProject/
 │  │  └─ merge.js             # 台词 JSON 转义 + 流内插入（content 内）
 │  ├─ locks.js                # 按 NPC 串行队列
 │  ├─ log.js                  # 环形缓冲（SSE 推送）+ 按天 JSONL
-│  ├─ tts/                    # 【实验性】语音朗读（Windows 内置语音，离线免费）
+│  ├─ tts/                    # 【实验性】语音朗读（Windows 内置语音 + 可选 Kokoro 神经语音）
 │  │  ├─ text.js              # JSON 兜底解包 → 去 markdown → 按模式抽取 → 按句截断
 │  │  ├─ voice.js             # 系统语音枚举（10min 缓存）、音色解析、逐 NPC 设置、性别判定
-│  │  ├─ synth.js             # PowerShell + WinRT 合成 WAV（并发 2 / 20s 超时 / LRU / 可 kill）
-│  │  └─ index.js             # 门面：文本 + 音色 + 合成
+│  │  ├─ synth.js             # Windows：PowerShell + WinRT 合成（并发 2 / 20s 超时 / LRU / 可 kill）
+│  │  ├─ kokoro.js            # Kokoro：sherpa-onnx 子进程合成（单并发 / 180s 超时 / LRU）
+│  │  ├─ install.js           # Kokoro 下载器（hf-mirror + GitHub 镜像 / 断点续传 / SHA-256）
+│  │  ├─ util.js              # 共用：临时目录、WAV 校验、数值归一化
+│  │  └─ index.js             # 门面：选引擎 → 清洗 → 选音色 → 合成；失败自动回退 Windows
 │  └─ memory/
 │     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照、逐 NPC 提示词
 │     ├─ inject.js            # 长期记忆 / 外置设定提示词注入文本组装
@@ -213,7 +218,23 @@ WorldApartProject/
 ```
 
 运行时数据：**正式档目录名 `data/`，测试档 `data_test/`**（CLI 与便携版同样规则）。
-开发态位于项目根，便携版位于 exe 同级；两档结构一致、内容完全隔离：
+开发态位于项目根，便携版位于 exe 同级；两档结构一致、内容完全隔离。
+**语音引擎不在这里**：Kokoro 运行时与模型（约 159 MB）放在 **exe 同层的 `tts-engines/`**，
+由正式档与测试档共用，避免切档重复下载（见 [docs/tts.md](docs/tts.md) §14.5）。
+
+> **启动即检测**：程序启动时检查 `tts-engines/kokoro/` 是否齐备（10 个文件），
+> 齐备则 `kokoroInstalled=true`、无需任何下载；缺任一文件视为未安装并自动回退系统语音。
+> 启动横幅与管理页都会显示引擎状态。
+>
+> **预置分发**：源码根的 `tts-engines/`（**已入库**，约 159 MB）+ `npm run dist:win` 会自动同步到
+> `releases/tts-engines/`（exe 同层）；`node workshop/publish.mjs` 再把它一并打进工坊内容包，
+> 玩家订阅后开箱即可用 Kokoro，无需联网下载。
+>
+> **模型为什么是分片**：`model.int8.onnx` 单个 108.91 MiB，**超过 GitHub 单文件 100 MiB 硬限制**
+> （超了直接拒绝 push）。因此仓库里存两个 <100 MiB 的分片 `model.int8.onnx.part00/01`，
+> 拼出的完整文件被 `.gitignore` 排除；`src/tts/assemble.js` 在首次检查引擎时自动拼回，
+> `dist.mjs` / `publish.mjs` 复制前也会先拼。`.gitattributes` 对 `tts-engines/**` 禁用换行转换，
+> 避免 lexicon 被 CRLF 改写导致 sha256 校验失败。
 
 ```
 data/  或  data_test/
@@ -226,7 +247,7 @@ data/  或  data_test/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
    ├─ prompt.json             # 该 NPC 个人提示词 {useGlobal,text}（可选；回复前注入）
-   ├─ voice.json              # 逐 NPC 语音设置 {enabled,gender,rate,pitch}（可选；缺失=跟随全局）
+   ├─ voice.json              # 该 NPC 语音设置 {enabled,gender,rate,pitch,voice}（可选；缺失=跟随全局）
    ├─ aliases.json            # 玩家可编辑的别名 {names:[]}（可选；共演点名识别用）
    ├─ cast.json               # 是否允许作为配角参与共演 {enabled:true}（可选；缺失=关闭）
    ├─ stage.json              # 共演在场状态 {sceneKey,onStage,updatedAt}（可选）
@@ -290,6 +311,11 @@ data/  或  data_test/
   开启后管理页自动朗读新到的 NPC 回复，执行日志每条可点 ▶ 手动朗读。文本清洗 / 性别判定 /
   音色解析 / 合成链路 / 四个管理接口 / 逐 NPC 音色 均有模块级与端到端回归（详见
   [docs/tts.md](docs/tts.md) 与 [docs/verification-log.md](docs/verification-log.md)）。
+- 0.19.0：新增可选 **Kokoro 离线神经语音引擎**（sherpa-onnx + Kokoro-82M int8，Apache-2.0）。
+  可选 **晓晓 / 小艺（女）+ 云希（男）**，实测 159.2 MB、安装 106 秒、国内 hf-mirror 可下。
+  装到 exe 同层 `tts-engines/`（两档共用），管理页点一下下载并显示进度；未安装或合成失败
+  **自动回退系统语音**，默认引擎仍是 Windows。代价：合成比播放慢（24 字约 6.7 秒）。
+  端到端 22 项回归通过。
 
 > 逐条验证证据、修过的缺陷与排障手册见 [docs/verification-log.md](docs/verification-log.md)。
 

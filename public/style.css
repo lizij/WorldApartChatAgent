@@ -80,8 +80,9 @@ textarea:focus { border-color: var(--accent); }
 .kv textarea { margin-top: 2px; }
 .act-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); cursor: pointer; }
-/* .check 的 display:flex 会覆盖 [hidden] 的默认 display:none，这里补回来 */
-.check[hidden] { display: none; }
+/* .grid / .row / .check 等都设了 display，会覆盖 [hidden] 的默认 display:none。
+   统一兜底：带 hidden 属性的一律不显示（否则「已安装」后按钮还挂在页面上）。 */
+[hidden] { display: none !important; }
 .check.small { font-size: 12px; color: var(--muted); }
 /* 重写缓存机制：单选行，title 提供悬浮说明 */
 .cache-modes { display: flex; flex-direction: column; gap: 6px; }
@@ -157,6 +158,9 @@ select:focus { border-color: var(--accent); }
 .badge.costar { background: #2f6b4f; }
 .badge.tts { background: #4a6b52; }
 .log-item.tts { border-left-color: #4a6b52; }
+/* 语音引擎下载进度条 */
+.tts-bar { height: 8px; background: #1b2029; border: 1px solid #262b36; border-radius: 999px; overflow: hidden; margin-top: 8px; }
+.tts-bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, #3a6ea5, #5b9bd6); transition: width .3s ease; }
 /* 执行日志里的朗读按钮：紧跟时间与日志编号。
    注意不能加 margin-left:auto —— 右侧留白由 .log-expand 的 auto 负责，
    两个 auto 会把空白平分，按钮就跑到中间去了。 */

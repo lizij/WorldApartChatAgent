@@ -83,9 +83,18 @@
 3. electron-builder 出 `releases/WorldApartNpcAgent-<version>-win-portable.exe`（x64，未签名）；
 4. **只补回缺失文件**、不覆盖已有文件地恢复两个数据目录（打包时程序通常还在跑，运行期写入的
    日志/state/intake 必须保留），再校验「备份里没有缺失」，最后清理 `win-unpacked`、`.blockmap`、
-   `latest.yml` 等中间产物。
+   `latest.yml` 等中间产物；
+5. 若源码根有 `tts-engines/`，把它同步到 `releases/tts-engines/`（exe 同层）。**只在缺失或不完整时才复制**
+   （10 个文件都得在），避免每次打包重拷 159 MB。源码没有就跳过，玩家改为在管理页按需下载。
 
 注意事项：
+
+- **语音引擎用「预置」还是「下载」**：引擎已放入仓库根 `tts-engines/`（约 159 MB，入库）→ 出包自动同步 →
+  工坊发布一并携带，玩家订阅后开箱即用、无需联网。不发引擎时删掉该目录即可，程序会退回
+  系统语音，并在管理页提供下载按钮。详见 [tts.md](tts.md) §16。
+- **模型分片**：`model.int8.onnx`（108.91 MiB）超过 GitHub 单文件 100 MiB 硬限制，仓库里存的是
+  `model.int8.onnx.part00/01`；拼出的完整文件不入库，构建与首次运行都会自动拼回。
+  换模型后跑 `node scripts/split-tts-model.mjs` 重新切分。
 
 - **不要在程序运行时打包**（虽然 0.17.1 起恢复逻辑已不会覆盖新写入，但关掉更稳妥）：
   0.17.0 出包时就踩过——旧逻辑用备份覆盖回去，把构建窗口里写入的一轮对话日志、会话记录与
@@ -97,6 +106,9 @@
   `ELECTRON_CACHE=<项目内目录>`、`ELECTRON_BUILDER_CACHE=<项目内目录>`、
   `ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/`。
 - `releases/`、`data/`、`data_test/`、`dist/`、`.eb-cache/` 均**不进仓库**；也不要提交任何平台二进制产物。
+  **例外**：`tts-engines/`（预置语音引擎）**要入库**，但模型必须存成分片
+  （`model.int8.onnx.part00/01`，每个 <100 MiB）；拼出的 `model.int8.onnx` 被 `.gitignore` 排除。
+  改动引擎文件后跑一次 `node scripts/split-tts-model.mjs` 重新切分。
 - exe 未签名，首次运行会有 SmartScreen 提示。
 - 重新出包后，**仓库版本号必须与产物文件名里的版本一致**（见 [contributing.md](contributing.md) §1）。
 

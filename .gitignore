@@ -1,6 +1,10 @@
 node_modules/
 data/
 data_test/
+# 语音引擎：分片入库（见 scripts/split-tts-model.mjs），拼出的完整模型不入库
+# （model.int8.onnx 单文件 108.91 MiB，超过 GitHub 100 MiB 硬限制会被拒绝推送 —— 实测报 GH001）
+tts-engines/kokoro/model.int8.onnx
+tts-engines/kokoro/model.int8.onnx.assembling
 *.log
 
 .eb-cache

@@ -51,6 +51,7 @@ import { entryOf, loadAliases, saveAliases, saveCastFlag } from './cast/registry
 import {
   speak,
   synthesize,
+  synthesizeKokoro,
   listVoices,
   resolveVoice,
   readVoice,
@@ -58,6 +59,12 @@ import {
   isVoiceEnabled,
   reset as ttsReset,
   shutdown as ttsShutdown,
+  installKokoro,
+  kokoroStatus,
+  isKokoroInstalled,
+  KOKORO_VOICES,
+  ENGINE_IDS,
+  activeEngine,
 } from './tts/index.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -476,6 +483,10 @@ export function createServer({ config, logger, getPortFallback = null }) {
         // 只给开关与参数，语音清单另走 /api/tts/voices（枚举要起一次 PowerShell）
         tts: {
           enabled: !!c.tts.enabled,
+          engine: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
+          // 实际生效的引擎（kokoro 未安装会自动降到 windows）
+          activeEngine: activeEngine(c),
+          kokoroInstalled: isKokoroInstalled(),
           readMode: c.tts.readMode,
           skipActions: !!c.tts.skipActions,
           defaultGender: c.tts.defaultGender,
@@ -537,8 +548,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
       if (baseUrl) safe.upstream.baseUrl = baseUrl;
       const model = strIn(patch.upstream.model, 200);
       if (model) safe.upstream.model = model;
-      if (patch.upstream.insecureTLS !== undefined) safe.upstream.insecureTLS = !!patch.upstream.insecureTLS;
-      if (patch.upstream.disableThinking !== undefined) safe.upstream.disableThinking = !!patch.upstream.disableThinking;
+      if (patch.upstream.insecureTLS !== undefined) safe.upstream.insecureTLS = !!patch.upstream.insecureTLS;      if (patch.upstream.disableThinking !== undefined) safe.upstream.disableThinking = !!patch.upstream.disableThinking;
       if (patch.upstream.includeUsage !== undefined) safe.upstream.includeUsage = !!patch.upstream.includeUsage;
       const ct = intIn(patch.upstream.connectTimeoutMs, 1000, 600000);
       if (ct !== undefined) safe.upstream.connectTimeoutMs = ct;
@@ -658,6 +668,16 @@ export function createServer({ config, logger, getPortFallback = null }) {
       for (const k of ['enabled', 'skipActions']) {
         if (t[k] !== undefined) safe.tts[k] = !!t[k];
       }
+      // 只有装了 Kokoro 才允许切过去，否则保持 windows（避免存一个用不了的引擎）
+      if (t.engine !== undefined) {
+        if (!ENGINE_IDS.includes(t.engine)) {
+          return sendJsonError(res, 400, 'bad_request', `未知的语音引擎: ${t.engine}`);
+        }
+        if (t.engine === 'kokoro' && !isKokoroInstalled()) {
+          return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装，请先在「实验功能」里下载');
+        }
+        safe.tts.engine = t.engine;
+      }
       if (t.readMode === 'all' || t.readMode === 'dialogue') safe.tts.readMode = t.readMode;
       if (t.defaultGender === 'male' || t.defaultGender === 'female') safe.tts.defaultGender = t.defaultGender;
       // 语音名：空串视为"回到默认"，仍按字符串收下（前端可能清空下拉）
@@ -666,6 +686,20 @@ export function createServer({ config, logger, getPortFallback = null }) {
         for (const g of ['male', 'female']) {
           if (typeof t.voices[g] === 'string') safe.tts.voices[g] = t.voices[g].trim().slice(0, 200);
         }
+      }
+      // Kokoro 音色（只接受清单里的名字）
+      if (t.kokoro && typeof t.kokoro === 'object') {
+        safe.tts.kokoro = {};
+        const valid = new Set(KOKORO_VOICES.map((v) => v.name));
+        for (const k of ['voiceFemale', 'voiceMale']) {
+          if (typeof t.kokoro[k] === 'string') {
+            const v = t.kokoro[k].trim();
+            if (v && !valid.has(v)) return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${v}`);
+            if (v) safe.tts.kokoro[k] = v;
+          }
+        }
+        const th = intIn(t.kokoro.threads, 1, 8);
+        if (th !== undefined) safe.tts.kokoro.threads = th;
       }
       // 注意：volume/rate/pitch 都是小数，不能用 intIn（Math.floor 会把 0.8 压成 0）
       const clampFloat = (v, min, max) => {
@@ -771,7 +805,19 @@ export function createServer({ config, logger, getPortFallback = null }) {
         conversations.push(JSON.parse(line));
       } catch {}
     }
-    const resolved = await resolveVoice(slug, cfg().tts);
+    const c0 = cfg();
+    const resolved = await resolveVoice(slug, c0.tts);
+    // Kokoro 引擎下，实际音色名与 gender 取自 Kokoro 音色表；否则沿用系统语音
+    const kokoroOn = activeEngine(c0) === 'kokoro';
+    const perVoice = readVoice(slug);
+    const kGender =
+      perVoice.gender === 'male' || perVoice.gender === 'female'
+        ? perVoice.gender
+        : resolved.gender;
+    const kVoice =
+      (perVoice.voice && KOKORO_VOICES.find((v) => v.name === perVoice.voice)) ||
+      KOKORO_VOICES.find((v) => v.name === (kGender === 'male' ? c0.tts.kokoro.voiceMale : c0.tts.kokoro.voiceFemale)) ||
+      KOKORO_VOICES[0];
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
@@ -785,12 +831,20 @@ export function createServer({ config, logger, getPortFallback = null }) {
         hasIntake: !!entryOf(slug)?.hasIntake,
         castEnabled: !!entryOf(slug)?.castEnabled,
         voice: readVoice(slug),
+        engine: kokoroOn ? 'kokoro' : 'windows',
         // 只回传前端要展示的字段：available 是完整语音清单，体积大且另有 /api/tts/voices
-        voiceResolved: {
-          gender: resolved.gender,
-          voiceName: resolved.voiceName,
-          reason: resolved.reason,
-        },
+        voiceResolved: kokoroOn
+          ? {
+              gender: kVoice.gender,
+              voiceName: kVoice.name,
+              voiceLabel: kVoice.label,
+              reason: perVoice.voice ? '该 NPC 指定了 Kokoro 音色' : `按${kVoice.gender === 'male' ? '男' : '女'}声取全局默认`,
+            }
+          : {
+              gender: resolved.gender,
+              voiceName: resolved.voiceName,
+              reason: resolved.reason,
+            },
       }),
     );
   }
@@ -1030,14 +1084,27 @@ export function createServer({ config, logger, getPortFallback = null }) {
     const force = url.searchParams.get('refresh') === '1';
     const voices = await listVoices({ force });
     const c = cfg();
+    const kstatus = kokoroStatus();
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
-        ok: voices.length > 0,
+        ok: voices.length > 0 || kstatus.installed,
         voices,
         suggested: {
           male: voices.some((v) => v.name === c.tts.voices.male) ? c.tts.voices.male : null,
           female: voices.some((v) => v.name === c.tts.voices.female) ? c.tts.voices.female : null,
+        },
+        // 引擎与音色清单（前端据此渲染下拉与安装按钮）
+        engines: {
+          current: activeEngine(c),
+          configured: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
+          kokoro: {
+            installed: kstatus.installed,
+            bytes: kstatus.bytes,
+            downloadBytes: kstatus.downloadBytes,
+            voices: KOKORO_VOICES,
+            state: kstatus.state,
+          },
         },
         hint: voices.length
           ? ''
@@ -1045,6 +1112,33 @@ export function createServer({ config, logger, getPortFallback = null }) {
       }),
     );
   }
+
+  /** 安装 Kokoro 引擎（后台执行，前端轮询 /api/tts/install）。 */
+  async function handleTtsInstall(req, res) {
+    if (isKokoroInstalled()) {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      return res.end(JSON.stringify({ ok: true, alreadyInstalled: true }));
+    }
+    // 已在下载中：不要重复启动（install() 会返回 already_running，但那时 HTTP 已回 started）
+    if (kokoroStatus().state?.running) {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      return res.end(JSON.stringify({ ok: true, alreadyRunning: true }));
+    }
+    // 不 await：安装有 159MB，不能把请求挂住
+    installKokoro().catch((err) => {
+      logger.append({ kind: 'tts', status: 'error', action: 'install', error: String(err?.message || err) });
+    });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, started: true }));
+  }
+
+  /** 安装进度（前端每 800ms 轮询一次）。 */
+  function handleTtsInstallStatus(req, res) {
+    const s = kokoroStatus();
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, ...s }));
+  }
+
 
   /**
    * 按日志 rid 合成语音。
@@ -1099,6 +1193,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
     const baseLog = {
       kind: 'tts',
       slug,
+      engine: result.engine || 'windows',
       mode: result.mode,
       chars: result.chars,
       voice: result.voiceName,
@@ -1106,10 +1201,11 @@ export function createServer({ config, logger, getPortFallback = null }) {
       auto,
       synthMs: result.synthMs ?? Date.now() - started,
       cached: !!result.cached,
+      ...(result.engineFallback ? { engineFallback: result.engineFallback } : {}),
     };
 
     if (!result.ok) {
-      const reason = result.reason || 'tts_powershell_failed';
+      const reason = result.reason || (result.engine === 'kokoro' ? 'kokoro_failed' : 'tts_powershell_failed');
       // 「这条没东西可读」是正常情况，不算故障：记 skipped，且不进界面
       const benign = reason === 'empty_text' || reason === 'not_plain_text';
       logTts({
@@ -1161,6 +1257,28 @@ export function createServer({ config, logger, getPortFallback = null }) {
     // 试听不绑 NPC：优先用调用方明确指定的音色（管理页下拉框里选中的那个），
     // 没指定才按性别取配置里的默认音色。
     // 注意：不能只用 gender —— 那样换下拉框里的音色也永远听同一个声音。
+    //
+    // engine=kokoro 时 voice 是 Kokoro 音色名（zf_xiaoxiao 等）；否则是系统语音名。
+    const wantEngine = body?.engine === 'kokoro' ? 'kokoro' : body?.engine === 'windows' ? 'windows' : activeEngine(c);
+    const started = Date.now();
+
+    if (wantEngine === 'kokoro') {
+      if (!isKokoroInstalled()) {
+        return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装');
+      }
+      const explicitK = KOKORO_VOICES.find((v) => v.name === strIn(body?.voice, 40));
+      const defK = gender === 'male' ? c.tts.kokoro.voiceMale : c.tts.kokoro.voiceFemale;
+      const voice = explicitK || KOKORO_VOICES.find((v) => v.name === defK) || KOKORO_VOICES[0];
+      const r = await synthesizeKokoro({ text, voice: voice.name, rate, threads: c.tts.kokoro.threads });
+      if (!r.ok) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', voice: voice.name, chars: text.length, error: r.detail ? `${r.reason}:${r.detail}` : r.reason });
+        return sendJsonError(res, 500, r.reason || 'kokoro_failed', 'Kokoro 合成失败');
+      }
+      logTts({ kind: 'tts', status: 'done', action: 'preview', engine: 'kokoro', voice: voice.name, gender: voice.gender, chars: text.length, bytes: r.wav.length, synthMs: r.synthMs ?? Date.now() - started });
+      res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': r.wav.length, 'cache-control': 'no-store' });
+      return res.end(r.wav);
+    }
+
     const voices = await listVoices();
     const explicit = strIn(body?.voice, 200);
     const want = gender === 'male' ? c.tts.voices.male : c.tts.voices.female;
@@ -1173,7 +1291,6 @@ export function createServer({ config, logger, getPortFallback = null }) {
       return sendJsonError(res, 400, 'tts_no_voice', '系统里没有可用的中文语音');
     }
 
-    const started = Date.now();
     const r = await synthesize({ text, voice: voiceName, rate, pitch });
     if (!r.ok) {
       logTts({
@@ -1214,8 +1331,15 @@ export function createServer({ config, logger, getPortFallback = null }) {
     } catch {
       return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
     }
-    const next = saveVoice(hit.slug, body && typeof body === 'object' ? body : {});
-    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, action: 'voice', voiceEnabled: next.enabled, gender: next.gender });
+    // Kokoro 音色名要校验，避免写入无法使用的值
+    const raw = body && typeof body === 'object' ? { ...body } : {};
+    if (typeof raw.voice === 'string' && raw.voice.trim()) {
+      if (!KOKORO_VOICES.some((v) => v.name === raw.voice.trim())) {
+        return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${raw.voice}`);
+      }
+    }
+    const next = saveVoice(hit.slug, raw);
+    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, action: 'voice', voiceEnabled: next.enabled, gender: next.gender, voice: next.voice || null });
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(JSON.stringify({ ok: true, voice: next }));
   }
@@ -2194,6 +2318,8 @@ export function createServer({ config, logger, getPortFallback = null }) {
         if (normPath === '/api/events' && req.method === 'GET') return handleEvents(req, res);
         // 语音朗读（TTS）
         if (normPath === '/api/tts/voices' && req.method === 'GET') return await handleTtsVoices(req, res, url);
+        if (normPath === '/api/tts/install' && req.method === 'POST') return await handleTtsInstall(req, res);
+        if (normPath === '/api/tts/install' && req.method === 'GET') return handleTtsInstallStatus(req, res);
         if (normPath === '/api/tts/preview' && req.method === 'POST') return await handleTtsPreview(req, res);
         const mtts = normPath.match(/^\/api\/tts\/audio\/([^/]+)$/);
         if (mtts && req.method === 'GET') return await handleTtsAudio(req, res, mtts[1], url);

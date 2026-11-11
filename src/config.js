@@ -176,11 +176,14 @@ export function defaults() {
     // 详见 docs/tts.md。
     tts: {
       enabled: false,
+      // 引擎：windows（系统自带语音，零下载、极快）/ kokoro（离线神经语音，需下载约 156MB）
+      // kokoro 未安装或调用失败时自动回退 windows
+      engine: 'windows',
       // all = 全部内容；dialogue = 只读引号内的对白（没有引号时自动回退 all）
       readMode: 'all',
       // all 模式下是否跳过（括号动作）
       skipActions: true,
-      // 全局男/女音色名（取不到时回退到系统第一个同性别中文语音）
+      // 全局男/女音色名（Windows 引擎用；取不到时回退到系统第一个同性别中文语音）
       voices: { male: 'Microsoft Kangkang', female: 'Microsoft Huihui' },
       // 性别判定失败时用哪个音色
       defaultGender: 'female',
@@ -191,6 +194,14 @@ export function defaults() {
       volume: 0.8,
       // 单条朗读字数上限（超出按句截断）
       maxChars: 600,
+      // Kokoro 引擎参数
+      kokoro: {
+        // 中文音色（说话人编号见 src/tts/kokoro.js；只保留实测可用的 3 个）
+        voiceFemale: 'zf_xiaoxiao',
+        voiceMale: 'zm_yunxi',
+        // 合成线程数：实测 4 最优（8 无提升，16+ 反而变慢）
+        threads: 4,
+      },
     },
   };
 }

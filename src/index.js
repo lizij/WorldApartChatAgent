@@ -4,6 +4,7 @@
  * 桌面（Electron）入口见 electron/main.cjs。
  */
 import { createApp } from './app.js';
+import { kokoroStatus } from './tts/index.js';
 
 const app = createApp();
 const IS_TEST = process.env.WFC_TEST === '1' || process.argv.includes('--test');
@@ -11,6 +12,11 @@ const IS_TEST = process.env.WFC_TEST === '1' || process.argv.includes('--test');
 app
   .start()
   .then((cfg) => {
+    // 启动即检查 exe 同层是否已有语音引擎：有就直接可用，无需再下载
+    const k = kokoroStatus();
+    const engineLine = k.installed
+      ? `语音引擎 : 已就绪（Kokoro ${(k.bytes / 1048576).toFixed(0)} MB，目录 ${k.engineDir}）`
+      : '语音引擎 : 仅 Windows 自带语音（Kokoro 可在管理页按需下载）';
     const banner = [
       '============================================================',
       '  《不问凡尘》外置 AI NPC 对话 Agent  v' + cfg.version + (IS_TEST ? '  [测试档]' : ''),
@@ -27,6 +33,7 @@ app
         : '',
       '管理页 : http://' + cfg.server.host + ':' + cfg.server.port + '/',
       '数据目录 : ' + cfg.dataDir,
+      engineLine,
       '',
       '按 Ctrl+C 停止服务（无后台进程）。',
       '------------------------------------------------------------',
@@ -41,6 +48,7 @@ app
       host: cfg.server.host,
       port: cfg.server.port,
       firstRun: app.config.firstRun,
+      kokoroInstalled: k.installed,
     });
   })
   .catch((err) => {

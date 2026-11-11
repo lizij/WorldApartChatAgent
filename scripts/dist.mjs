@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureModelAssembled } from '../src/tts/assemble.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 与 src/config.js 的目录名保持一致：正式档 data/、测试档 data_test/
@@ -80,6 +81,53 @@ function cleanupArtifacts() {
   }
 }
 
+/**
+ * 把源码目录的语音引擎同步到 releases/（exe 同层）。
+ *
+ * 程序运行时按「exe 同级 tts-engines/」查找引擎，所以出包后该目录必须与 exe 并排。
+ * electron-builder 不会删除它，因此只在缺失/不完整时才复制（避免每次打包重拷 159MB）。
+ * 源码目录没有引擎时跳过：那样玩家就需要在管理页点下载。
+ */
+function syncTtsEngine() {
+  const src = path.join(root, 'tts-engines');
+  const dst = path.join(root, 'releases', 'tts-engines');
+  if (!fs.existsSync(src)) {
+    console.log('[dist] 源码目录没有 tts-engines/，跳过（玩家将在管理页按需下载）');
+    return;
+  }
+  // 仓库里存的是模型分片（单文件超 GitHub 100 MiB 限制），这里先拼回完整模型
+  const asm = ensureModelAssembled(path.join(src, 'kokoro'));
+  if (asm.assembled) console.log('[dist] 已由分片拼回 model.int8.onnx');
+  const required = [
+    'kokoro/model.int8.onnx',
+    'kokoro/voices.bin',
+    'kokoro/tokens.txt',
+    'kokoro/lexicon-zh.txt',
+    'kokoro/lexicon-us-en.txt',
+    'kokoro/number-zh.fst',
+    'kokoro/date-zh.fst',
+    'kokoro/phone-zh.fst',
+    'kokoro/runtime/sherpa-onnx-offline-tts.exe',
+    'kokoro/runtime/onnxruntime.dll',
+  ];
+  const missing = required.filter((rel) => {
+    try {
+      return fs.statSync(path.join(dst, rel)).size === 0;
+    } catch {
+      return true;
+    }
+  });
+  if (!missing.length) {
+    console.log('[dist] releases/tts-engines/ 已就绪，跳过复制');
+    return;
+  }
+  console.log(`[dist] 复制语音引擎到 releases/tts-engines/（缺 ${missing.length} 个文件）`);
+  fs.rmSync(dst, { recursive: true, force: true });
+  copyDir(src, dst);
+  const total = required.reduce((n, rel) => n + fs.statSync(path.join(dst, rel)).size, 0);
+  console.log(`[dist] releases/tts-engines/ 就绪（${(total / 1048576).toFixed(1)} MB）`);
+}
+
 try {
   for (const name of PROFILES) {
     const dataDir = path.join(root, 'releases', name);
@@ -102,6 +150,7 @@ try {
       `[dist] ${b.name}/ 已恢复（补回 ${r.restored} 个缺失文件，保留 ${r.kept} 个运行期写入）`,
     );
   }
+  syncTtsEngine();
   cleanupArtifacts();
 } catch (err) {
   console.error('[dist] 构建失败：', err.message);

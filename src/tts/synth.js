@@ -16,13 +16,13 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { DATA_DIR } from '../config.js';
+import { ensureTmpDir, wavDataSize, numOrNull } from './util.js';
 
 const TIMEOUT_MS = 20000;
 const MAX_CONCURRENCY = 2;
 const CACHE_MAX = 20;
 
 const TMP_DIR = path.join(DATA_DIR, 'tmp', 'tts');
-let tmpReady = false;
 
 const PS_SCRIPT = `
 $ErrorActionPreference = 'Stop'
@@ -64,19 +64,7 @@ let running = 0;
 const waiting = [];
 
 function ensureTmp() {
-  if (tmpReady) return;
-  tmpReady = true;
-  try {
-    fs.mkdirSync(TMP_DIR, { recursive: true });
-    // 清掉上次异常退出留下的临时文件
-    for (const n of fs.readdirSync(TMP_DIR)) {
-      if (/\.(json|wav)$/i.test(n)) {
-        try {
-          fs.rmSync(path.join(TMP_DIR, n), { force: true });
-        } catch {}
-      }
-    }
-  } catch {}
+  return ensureTmpDir();
 }
 
 /** 内存 LRU：指纹 → WAV Buffer。 */
@@ -109,30 +97,8 @@ function release() {
 }
 
 /**
- * 读 WAV 里 data 块的长度。
- * 实测空文本只产出 46 字节（44 字节头 + 2 字节多余），只看文件大小会漏判，
- * 必须看 data 块实际有没有内容。
+ * 读 WAV 里 data 块的长度（实现在 util.js，与 Kokoro 共用）。
  */
-function wavDataSize(buf) {
-  if (!buf || buf.length < 44) return 0;
-  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return 0;
-  let off = 12;
-  while (off + 8 <= buf.length) {
-    const id = buf.toString('ascii', off, off + 4);
-    const size = buf.readUInt32LE(off + 4);
-    if (id === 'data') return size;
-    off += 8 + size + (size % 2);
-  }
-  return 0;
-}
-
-function numOrNull(v) {
-  // 注意：Number(null) === 0、Number('') === 0 —— 必须先排除"空"，
-  // 否则 rate/pitch 传 null 会被当成 0 送进 WinRT（SpeakingRate=0 直接失败）
-  if (v === null || v === undefined || v === '') return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-}
 
 /**
  * 合成一段文本。

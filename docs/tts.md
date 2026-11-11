@@ -49,7 +49,11 @@
 | Microsoft David / Zira / Mark | Male / Female / Male | en-US |
 
 - 经典 SAPI（`System.Speech`）的注册表里只有 `Huihui`，**中文男声必须走 WinRT**。
-- 玩家装 Windows 11「自然语音」后会自动出现在枚举列表，同一套代码自动升级音质。
+- **更正（2026-11-11）**：Windows 11 讲述人的「自然语音」（Xiaoxiao / Yunxi 等）**第三方程序用不了**。
+  它们属于第四套独立的语音系统（Azure 内嵌语音，微软限制访问），只供讲述人使用，
+  **不会出现在 WinRT `SpeechSynthesizer.AllVoices` 里**——本程序装了自然语音也不会自动变好。
+  社区的 `NaturalVoiceSAPIAdapter` 是提取系统密钥的 hack，仅供 SAPI5，且可能随系统更新失效，
+  不作为本项目的依赖。要更好的音质必须换引擎，见 §14。
 
 ### 1.2 实测耗时（本机，走完整链路）
 
@@ -387,7 +391,8 @@ data*/tmp/tts/                 # 合成临时目录（job.json / *.wav），启�
 
 ## 8. 风险与已知限制
 
-1. **音质偏机械** —— 免费离线方案的上限；装 Windows 11 自然语音后自动改善。
+1. **音质偏机械** —— 系统自带的是 2013~2016 年的 MSTTS 参数式语音，这是引擎上限；
+   Windows 11 自然语音不对外开放，无法改善（见 §1.1）。换引擎见 §14。
 2. **首音约 0.6~1.0 秒**（日志出现 → 请求 → 合成 → 播放），实测单次合成 0.39~0.60s。
 3. **管理窗必须开着**才能出声（它是程序本体；最小化正常，关窗即退出）。
 4. **杀软/组策略可能拦截** 短时启动的 `powershell.exe`（`-ExecutionPolicy Bypass` 也可能被
@@ -641,3 +646,370 @@ NPC 记录仍在；磁盘上这些记录**确实写入**且全部带 `uiHidden: 
 
 **完整回归**：27 项（模块级 10 + 端到端 17）全部通过，包含音色可区分、
 关闭 TTS 时零子进程、静音 NPC 204/手动 200、非 NPC 记录 400、配置往返与夹取。
+
+---
+
+## 14. 音质优化方案（2026-11-11 定稿）
+
+> 前提两点（依反馈）：**① 现有朗读方案基本可用，只做小幅调整；② 可以外挂引擎，但必须国内可下载。**
+
+### 14.1 为什么现在机械
+
+系统自带中文语音是 **MSTTS V110**（`Huihui` 2016 / `Yaoyao` 2013 / `Kangkang` 2013），
+16 kHz、**参数式（非神经）**合成，为「读菜单」设计。机械感来自引擎本身，调参数只能减轻、不能消除。
+
+**Windows 11「自然语音」不可用**：Xiaoxiao / Yunxi 等属于第四套独立语音系统（Azure 内嵌语音），
+微软限制第三方访问，**不会出现在 WinRT `AllVoices`**。社区 `NaturalVoiceSAPIAdapter` 是提取
+系统密钥桥接到 SAPI5 的 hack（可能随系统更新失效），**不作为依赖**。
+
+所以提升音质只有一条路：**换神经 TTS 引擎**。
+
+### 14.2 国内可下载性实测（关键结论）
+
+| 资源 | 来源 | 大小 | 实测速度 | 预计耗时 |
+| --- | --- | --- | --- | --- |
+| HuggingFace **直连** | huggingface.co | — | **失败（10.7s 超时）** | ❌ 不可用 |
+| Piper 引擎 | GitHub Releases | 21.4 MB | 846 KB/s | ~26 s |
+| Piper 中文模型（huayan-medium） | **hf-mirror** | 60.3 MB | 824 KB/s | ~75 s |
+| sherpa-onnx 运行时 | GitHub Releases | 18.0 MB | 201 KB/s | ~90 s |
+| Kokoro int8 模型 | **hf-mirror** | 108.9 MB | 836 KB/s | ~2.2 min |
+| Kokoro voices.bin | **hf-mirror** | 26.9 MB | ~800 KB/s | ~35 s |
+| Kokoro 中文词典 | **hf-mirror** | 2.3 MB | — | ~5 s |
+| sherpa TTS 大模型走 GitHub | GitHub Releases | 140~350 MB | **~56 KB/s** | ❌ 42 分钟起 |
+
+**结论**：
+
+1. **HuggingFace 直连必须放弃**，一律走 `hf-mirror.com`（API 与文件都可用，实测 800+ KB/s）。
+2. **大模型不要从 GitHub Releases 下**（56 KB/s）；GitHub 只用来取 20 MB 级别的**引擎本体**。
+3. 总下载量控制在 **160 MB 以内、4 分钟以内**是国内网络的现实上限。
+
+### 14.3 候选引擎（本地 / 免费 / 开源 / 国内可下）
+
+| 方案 | 许可证 | 总下载 | 中文音色 | 自然度 | 结论 |
+| --- | --- | --- | --- | --- | --- |
+| **Windows MSTTS（现状）** | 系统自带 | 0 | 1 男 2 女 | ★☆☆☆☆ | 保留为默认与兜底 |
+| **sherpa-onnx + Kokoro int8** | Apache-2.0 | **~156 MB** | **4 男 4 女** | ★★★★☆ | **推荐外挂引擎** |
+| sherpa-onnx + MeloTTS zh_en int8 | MIT | ~80 MB | 1 女（单说话人） | ★★★★☆ | 轻量备选（缺男声） |
+| **Piper** | MIT | ~82 MB | 3 个中文音色（**均为女声**，实现时复核） | ★★★☆☆ | 备选（体积小、缺男声） |
+| IndexTTS2 / CosyVoice2 | Apache-2.0 | 数 GB | 可克隆 | ★★★★★ | ❌ 需 Python + GPU（4~8 GB 显存） |
+| ChatTTS | AGPL-3.0 + 权重 CC BY-NC | ~1 GB | 口语化最强 | ★★★★☆ | ❌ 许可证不适合 |
+
+**选 Kokoro 的理由**：中文 8 个说话人（`zf_xiaobei / zf_xiaoni / zf_xiaoxiao / zf_xiaoyi` 女，
+`zm_yunjian / zm_yunxi / zm_yunxia / zm_yunyang` 男）**天然满足「男/女」需求且可选**，
+82M 参数在 CPU 上够快，Apache-2.0 可商用，全部资源都在 hf-mirror。
+
+### 14.4 第一条线：现有引擎的小幅调整（不下载任何东西）
+
+| 改动 | 依据（本机实测） | 预期收益 |
+| --- | --- | --- |
+| **SSML 标点停顿** | `SynthesizeSsmlToStreamAsync` 可用：加 0.7 s 停顿后音频 166,862 → 219,432 B | 有呼吸感，最直接减少「一口气念完」 |
+| **常驻 PowerShell worker** | 单句合成仅 **8~12 ms**，而一次进程启动约 400 ms | 首音 0.6 s → **~0.15 s** |
+| **按句流式播放** | 同上 | 不必等整段合成完，接话更快 |
+| **对白/旁白分速** | 引号内台词 `rate=0.95`、旁白 `rate=1.08`；问句 `pitch` 微降 | 听感从「念」变「演」 |
+| 数字/多音字 `<say-as>`、`<phoneme>` | SSML 支持 | 少念错（如「二〇二六」） |
+
+**如实说明**：这一条线改善的是**节奏与呼吸**，音色本身的电子味消不掉；
+按反馈的预期，收益「有限但便宜」，值得做，不能指望脱胎换骨。
+
+### 14.5 第二条线：外挂引擎（Kokoro）
+
+**体积实测（决定「打包」还是「下载」）**
+
+| 组成 | 文件 | 大小 |
+| --- | --- | --- |
+| 运行时 | `sherpa-onnx-offline-tts.exe` | 1.76 MB |
+| 运行时 | `onnxruntime.dll` | 13.55 MB |
+| 模型 | `model.int8.onnx` | **108.91 MB** |
+| 模型 | `voices.bin`（53 个说话人） | 26.89 MB |
+| 模型 | `lexicon-us-en.txt` | 5.68 MB |
+| 模型 | `lexicon-zh.txt` | 2.26 MB |
+| 模型 | `tokens.txt` / `number-zh.fst` / `date-zh.fst` / `phone-zh.fst` | 0.20 MB |
+| **合计** | | **≈ 159.3 MB** |
+
+**结论：远超 100 MB，不能打包进 exe。** 仅 `model.int8.onnx` 一个文件就 108.9 MB，
+即使把 `voices.bin` 裁剪到只保留 3 个说话人（约省 25 MB），总量仍有约 134 MB。
+因此走**点击后下载**。
+
+**目录约定**（在 **exe 同层**，不在 `data/` 内）：
+
+```text
+tts-engines/                        # 正式档与测试档共用，切换档位不必重下 144MB
+└─ kokoro/
+   ├─ runtime/
+   │  ├─ sherpa-onnx-offline-tts.exe
+   │  └─ onnxruntime.dll
+   ├─ model.int8.onnx
+   ├─ voices.bin
+   ├─ tokens.txt
+   ├─ lexicon-zh.txt
+   ├─ lexicon-us-en.txt
+   └─ number-zh.fst / date-zh.fst / phone-zh.fst
+```
+
+> 已 gitignore。运行时只保留 2 个文件（实测 15.3 MB 即可独立跑通），
+> 不必带整套 53.7 MB 的 `bin/` + `lib/`。
+
+**引擎抽象**（`src/tts/index.js` + `kokoro.js` / `synth.js`）：
+
+```js
+// 统一接口：返回 WAV Buffer
+synthesize({ text, voice, rate, pitch }) -> { ok, wav, synthMs, reason? }
+```
+
+- `windows`：WinRT + PowerShell，**默认 + 兜底**
+- `kokoro`：子进程调 `sherpa-onnx-offline-tts.exe`，用 `--sid` 选说话人
+- 引擎目录缺失 / 调用失败 → **自动回退 `windows`**，只记一条日志，不打断朗读
+
+**逐 NPC 音色模型**（`voice.json` 扩展，向后兼容）：
+
+```json
+{ "enabled": true, "engine": "kokoro", "voice": "zm_yunxi", "ssml": true, "rate": 1.0 }
+```
+
+原有 `gender: male/female` 保留：`engine=kokoro` 时映射到该 NPC 的 Kokoro 音色；
+未设置时按性别取默认（男 `zm_yunxi`、女 `zf_xiaoxiao`）。
+
+**下载器**（管理页，新增「语音引擎」区块）：
+
+- 按「引擎 → 模型」两步下载，显示进度、速度、剩余时间
+- 镜像顺序：**hf-mirror → ModelScope → GitHub**，失败自动换下一个并提示
+- 断点续传（`Range`）；下载完校验 SHA-256（随清单内置）
+- 全部走 Node 原生 `https`，**不引入 npm 依赖**
+- 下载中允许继续游戏（后台进行），完成后按钮变「已就绪 / 试听」
+
+### 14.6 交付分档
+
+| 档位 | 玩家需要做什么 | 音色 | 体积 |
+| --- | --- | --- | --- |
+| **默认（开箱）** | 什么都不做 | Windows 内置：1 男 2 女（机械） | 0 |
+| **Kokoro（已实装）** | 点一下下载（159 MB，实测约 3~5 分钟） | **晓晓 / 小艺（女）、云希（男）** | +159 MB |
+| Piper（备选） | 点一下下载（约 82 MB） | 仅 1 个中文女声，无男声 | +82 MB |
+| 真人级 | 自备 Python + 显卡 | IndexTTS2 / CosyVoice2 | 数 GB |
+
+> 只有 Kokoro 同时满足「接近真人」与「有中文男声」，因此实装它；
+> Piper 的中文模型 `chaowen` / `xiao_ya` 在本机实测**直接报错退出**
+> （`"ai" is not a single codepoint`），实际只有 `huayan` 一个女声可用。
+
+### 14.7 实施顺序
+
+1. **第一步（本轮）**：引擎抽象层 + 现有实现迁入 `windows` 引擎（行为不变，先保证可插拔）
+2. **第二步**：SSML 停顿 / 分速 / 常驻 worker / 按句流式（纯本地，无下载）
+3. **第三步**：下载器（hf-mirror 优先、断点续传、校验）+ 管理页进度 UI
+4. **第四步**：接入 Kokoro（选说话人、逐 NPC 音色、试听）
+5. **第五步**：Piper 作为轻量备选；更新文档与验证记录
+
+> **红线不变**：不引入运行时 npm 依赖、不改游戏请求链路、关窗即退、
+> 引擎调用必须可超时可 kill（与现有 `synth.js` 同一套约束）。
+
+### 14.8 明确不做
+
+- IndexTTS2 / CosyVoice2 / ChatTTS：需 Python 或 GPU、或 AGPL/非商用权重，破坏便携与许可边界
+- Windows 自然语音 hack（`NaturalVoiceSAPIAdapter`）：依赖提取系统密钥，随更新失效
+- 云端 TTS：与「离线、免费、无 Key」的产品承诺冲突
+
+---
+
+## 15. 引擎实现与实测（0.19.0）
+
+### 15.1 落地形态
+
+| 项 | 值 |
+| --- | --- |
+| 默认引擎 | `windows`（系统 WinRT 语音），零下载、首音约 0.5 s |
+| 可选引擎 | `kokoro`（sherpa-onnx + Kokoro-82M int8），开箱不用，玩家点一下下载 |
+| 可选音色 | **晓晓（zf_xiaoxiao, 47, 女）· 小艺（zf_xiaoyi, 48, 女）· 云希（zm_yunxi, 50, 男）** |
+| 下载体积 | **159.2 MB**（运行时 15.3 + 模型 143.9） |
+| 安装位置 | exe 同层 `tts-engines/kokoro/`（正式档与测试档共用，切档不重下） |
+| 实测下载 | **106 秒**（运行时走 GitHub 约 0.2 MB/s，模型走 hf-mirror 7~17 MB/s） |
+
+### 15.2 为什么没打包进 exe
+
+实测精确体积：`model.int8.onnx` 一个文件就 **108.91 MB**，总量 159.25 MB，
+远超 100 MB 的门槛。即使把 `voices.bin` 的 53 个说话人裁到 3 个（省约 25 MB），
+仍有约 134 MB。因此**运行时与模型全部按需下载**，exe 保持约 100 MB 不变。
+
+### 15.3 下载器
+
+- 镜像顺序：模型走 **hf-mirror**（HF 直连实测超时 10.7s，不可用）；
+  运行时走 **GitHub → gh-proxy.com → ghproxy.net**
+- **断点续传**（HTTP Range），换镜像时保留半截文件继续
+- **逐文件 SHA-256 校验**，不匹配即删除重下
+- 运行时只保留 `sherpa-onnx-offline-tts.exe` + `onnxruntime.dll` 两个文件
+  （实测 15.3 MB 可独立跑通，不必带整套 53.7 MB 的 `bin/`+`lib/`）
+- 全部 Node 原生 API + 系统自带 `tar`（Windows 的 bsdtar 支持 bz2），**零 npm 依赖**
+- 后台下载，管理页每 800ms 轮询进度（含速度、剩余秒数），期间可继续游戏
+
+### 15.4 速度与体验取舍（如实说明）
+
+| 场景 | Windows 引擎 | Kokoro |
+| --- | --- | --- |
+| 模型加载 | 无 | 每次调用约 1.6 s |
+| 24 字台词 | 0.45 s 出声 | **6.7 s 合成**（音频 3.7 s） |
+| 首音延迟 | 约 0.5 s | 约 2~7 s |
+
+Kokoro **比实时慢**（RTF≈1.3~1.7），因此：
+
+- 默认仍是 `windows`；**装完不会自动切换**，玩家自己试听后决定；
+- 长句等待明显，短句体验尚可；
+- 已做单并发（1 个进程）避免互相拖慢，线程数默认 4（实测 8 无提升，16/32 更慢）。
+
+### 15.5 回退与安全
+
+- Kokoro 未安装 → 直接走 `windows`，不报错
+- Kokoro 合成失败 / 超时（180 s）/ 模型缺失 → **自动回退 `windows`**，只记一条 `tts` 日志，玩家仍有声音
+- 配置接口拒绝切到未安装的引擎（400 `engine_not_installed`）、拒绝未知音色（400）
+- 关服时两个引擎的在飞子进程都会被 `kill`（`ttsShutdown()`），不拖住进程退出
+
+### 15.6 验收记录（2026-11-12）
+
+**安装器**：从零安装 → `installed: true`，实际体积 159.2 MB，用时 106 s，10 个文件全部通过 SHA-256。
+
+**端到端 22 项全通过**：
+
+| 组 | 覆盖 |
+| --- | --- |
+| 引擎状态 | `/api/tts/voices` 报告 `kokoro.installed=true`、3 个音色、`current=windows` |
+| 配置校验 | 拒绝未知引擎（400）、拒绝未知 Kokoro 音色（400）、正常切换并持久化 |
+| 朗读 | 走 Kokoro 成功返回 RIFF/WAV（179 KB，6.7 s）；切回 Windows 仍正常 |
+| 日志 | 朗读成功仍**不进执行日志**（`tts` 记录 0 条） |
+| 试听 | `engine=kokoro` 下 `zf_xiaoxiao` 与 `zf_xiaoyi` 输出不同（音色确实切换） |
+| NPC 详情 | 返回 `engine` 与 `voiceResolved`；逐 NPC 指定 `zm_yunxi` 生效；未知音色 400 |
+| 安装状态 | `/api/tts/install` 返回 `installed=true`、体积 > 150 MB |
+
+**修复过的问题**：
+
+| 问题 | 处理 |
+| --- | --- |
+| 运行时 tar 的字节数手写成 18,010,241（实际 18,893,451） | 长度校验永远失败、无限重试且进度累加到 51MB 卡住；改用 API 给出的精确值 |
+| 镜像重试时进度重复累加 | 进度改为「已完成文件字节 + 本文件当前字节」，重试不再叠加 |
+| 镜像不支持 Range 却按续传写 | 检测响应码：非 206 时强制从头写 |
+| 两个引擎各自清理同一个临时目录 | 统一到 `src/tts/util.js` 的 `ensureTmpDir()`，全进程只清一次 |
+
+---
+
+## 16. 预置引擎与分发（0.19.0 收尾）
+
+### 16.1 为什么预置
+
+Kokoro 引擎 159 MB，下载对玩家是门槛（虽实测 106 秒，但依赖网络与镜像）。
+既然要发 Steam 工坊，直接把引擎放进分发包，**玩家订阅后开箱即用，不需要任何下载**。
+
+### 16.2 目录与流转
+
+```text
+<仓库根>/tts-engines/kokoro/          ← 开发者放一份（gitignore，159 MB）
+        │  npm run dist:win 时自动同步（缺文件才复制，避免每次重拷）
+        ▼
+<仓库根>/releases/tts-engines/kokoro/ ← 与 exe 并排（便携版运行时查找位置）
+        │  node workshop/publish.mjs 时整目录复制进内容包
+        ▼
+workshop/release/tts-engines/kokoro/  ← 工坊分发包
+workshop/release/WorldApartNpcAgent-<ver>-win-portable.exe
+```
+
+Steam 订阅后玩家拿到：
+```text
+SteamLibrary\steamapps\workshop\content\4209920\<物品ID>\
+├─ WorldApartNpcAgent-0.19.0-win-portable.exe
+├─ tts-engines\kokoro\...      ← 引擎就在这里，程序启动直接识别
+├─ README.txt
+└─ LICENSE
+```
+
+### 16.3 启动即检测（不重复下载）
+
+`kokoro.isInstalled()` 检查 `tts-engines/kokoro/` 下 **10 个文件是否都非空**：
+8 个模型文件 + 运行时 `sherpa-onnx-offline-tts.exe` / `onnxruntime.dll`。
+
+| 情形 | 行为 |
+| --- | --- |
+| 10 个文件齐备 | `kokoroInstalled=true`，**不发起任何下载**；`POST /api/tts/install` 直接返回 `alreadyInstalled` |
+| 缺任一文件（含 0 字节） | 判定未安装，管理页显示「未安装 + 下载按钮」，运行时自动回退系统语音 |
+| 引擎在但配置仍是 windows | 保持 windows（装完不自动切换，见 §15.4） |
+
+启动横幅会打印一行：
+```text
+语音引擎 : 已就绪（Kokoro 159 MB，目录 ...\tts-engines\kokoro）
+```
+`/api/status` 与 `/api/tts/voices` 同步暴露 `engine` / `activeEngine` / `kokoroInstalled` / `bytes`。
+
+### 16.4 工坊发布校验
+
+`workshop/publish.mjs` 的 `validateContentDir()` 放行且**只放行**：
+1 个 exe + `README.txt` + `LICENSE` + 可选的 `tts-engines/`。
+若 `tts-engines/` 存在但缺文件，直接中止并列出缺失项 ——
+避免把「半套引擎」发出去，让玩家误以为装好了却用不了。
+
+体积上限从 100 MB 提到 400 MB（exe 95 + 引擎 159 ≈ 255 MB），
+超过就说明混进了 `data/` 之类运行数据。
+
+### 16.5 验收（2026-11-12）
+
+| 项 | 结果 |
+| --- | --- |
+| 源码目录 `tts-engines/` | 10 个文件 / 159.2 MB |
+| `npm run dist:win` 首次同步 | `复制语音引擎到 releases/tts-engines/（缺 10 个文件）` → `就绪 159.2 MB` |
+| 再次打包 | `releases/tts-engines/ 已就绪，跳过复制`（不重拷） |
+| 便携版启动 | `语音引擎 : 已就绪（Kokoro 159 MB…）`；`/api/status` → `kokoroInstalled=true` |
+| 引擎已存在时 `POST /api/tts/install` | `alreadyInstalled=true`，未触发下载 |
+| 删掉 `voices.bin` 后启动 | `kokoroInstalled=false`、`activeEngine=windows`、占用显示 132 MB（部分文件） |
+| 恢复文件后 | `kokoroInstalled=true` |
+| `node workshop/publish.mjs --pack-only` | `已预置语音引擎：tts-engines/（159.2 MB）`，内容总大小 **254.7 MB** |
+| 工坊内容包结构 | exe 95.4 + `tts-engines/` 159.2 + README + LICENSE，引擎 10 个文件齐全 |
+
+回归 **34 项全部通过**（模块级 14 + 端到端 20），含新增的
+`engine-dir-outside-data`、`partial-not-installed`、`status-kokoro-installed`、
+`install-noop-when-present`、`source-engine-exists`。
+
+---
+
+## 17. 引擎入库与 GitHub 体积限制（0.19.0）
+
+### 17.1 硬限制
+
+GitHub 对**单个文件**的限制（官方文档）：
+
+| 阈值 | 行为 |
+| --- | --- |
+| > 50 MiB | 只是警告，push 仍成功 |
+| **> 100 MiB** | **直接拒绝 push**（blocks） |
+| 浏览器上传 | 单文件 ≤ 25 MiB |
+
+我们的引擎总量 159.2 MB，单个最大文件 `model.int8.onnx` = 114,202,993 字节 = **108.91 MiB**
+→ 超过 100 MiB，**普通 git 提交必然被拒**。
+
+其余文件都没问题：
+`voices.bin` 26.89、`onnxruntime.dll` 13.55、`lexicon-us-en.txt` 5.68、`lexicon-zh.txt` 2.26、
+exe 1.76、三个 `.fst` < 0.1 MiB、`tokens.txt` < 1 KiB。
+
+### 17.2 采用方案：分片入库（不用 Git LFS）
+
+把模型切成 2 片（60 MiB + 48.91 MiB），全部 < 100 MiB：
+
+```text
+tts-engines/kokoro/model.int8.onnx.part00   62,914,560 B (60.00 MiB)   ← 入库
+tts-engines/kokoro/model.int8.onnx.part01   51,288,433 B (48.91 MiB)   ← 入库
+tts-engines/kokoro/model.int8.onnx         114,202,993 B (108.91 MiB)  ← .gitignore
+```
+
+- `scripts/split-tts-model.mjs`：换模型后重新切分。
+- `src/tts/assemble.js` 的 `ensureModelAssembled(dir)`：完整文件不存在时按 `part00`→`part01`
+  顺序拼接（先写 `.assembling` 再 rename，失败不留半个文件），幂等。
+- 触发点：`isInstalled()` 首次调用（进程内只查一次）、`scripts/dist.mjs`、`workshop/publish.mjs`。
+- `.gitattributes`：`tts-engines/** -text`，**禁用换行转换** ——
+  否则 `lexicon-zh.txt` 等在 checkout 时被写成 CRLF，字节变化会导致 sha256 校验失败、分词异常。
+
+**为什么不选 Git LFS**：LFS 免费额度是 1 GiB 存储 + 1 GiB/月流量，一次 clone 就吃掉 159 MB，
+加上 CI 与多机开发很容易超；分片入库没有配额，clone/CI 都能直接拿到文件。
+
+### 17.3 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 分片大小 | 60.00 / 48.91 MiB，均 < 100 MiB |
+| 拼回结果 | 114,202,993 字节，与原文件一致 |
+| 幂等 | 第二次调用 `assembled:false`，不重复写 |
+| 入库文件最大 | 60.00 MiB（`part00`） |
+| 完整模型是否入库 | 否（`git check-ignore` 命中 `.gitignore:6`） |
+| 文本文件字节一致性 | `lexicon-zh` / `lexicon-us-en` / `tokens` 的 `git hash-object` 与索引 blob 完全一致 |
+| 删掉完整模型后启动 | 自动拼回并打印 `已由分片拼回模型（108.9 MB）` |

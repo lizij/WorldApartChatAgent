@@ -1,0 +1,6 @@
+# 语音引擎里的文件必须**逐字节**原样保存：
+#   - .onnx / .bin / .fst / .dll / .exe 本来就是二进制；
+#   - lexicon-zh.txt / lexicon-us-en.txt / tokens.txt 虽是文本，但模型按字节读取词表，
+#     一旦被 git 做 CRLF 转换就会与下载时校验的 sha256 不符、甚至影响分词。
+# 因此整个目录禁用换行转换（-text）。
+tts-engines/** -text

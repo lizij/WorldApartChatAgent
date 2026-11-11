@@ -550,3 +550,43 @@
   管理页移除「语音」筛选 chip。验证 9 项：朗读 3 次 + 试听 2 次后界面 `tts` 记录为 **0**、
   NPC 记录仍在，磁盘上记录确实写入且都带 `uiHidden`，重启回读后界面仍无 tts 成功记录。
   完整回归 27 项（模块级 10 + 端到端 17）全部通过。
+
+- **可选神经语音引擎 Kokoro（2026-11-12，0.19.0）**：按玩家选择（晓晓 / 小艺 / 云希）实装第二个引擎。
+  **体积实测**：运行时 `sherpa-onnx-offline-tts.exe` 1.76 MB + `onnxruntime.dll` 13.55 MB +
+  `model.int8.onnx` 108.91 MB + `voices.bin` 26.89 MB + 词典 8.14 MB ≈ **159.2 MB / 10 个文件**，
+  单个模型就超过 100 MB，故**不打包进 exe**，改为管理页点一下下载（exe 仍 95.4 MB）。
+  安装位置在 **exe 同层 `tts-engines/kokoro/`**（不是 `data/` 内），正式档与测试档共用，切档不重下。
+  **安装器**：模型走 hf-mirror（7~17 MB/s）、运行时走 GitHub + gh-proxy + ghproxy.net；
+  断点续传（Range，非 206 时强制从头写）、逐文件 SHA-256 校验；全 Node 原生 API + 系统 tar，零依赖。
+  实测**从零安装 106 秒**、10 个文件校验全过。**默认引擎仍是 Windows**，装完不自动切换。
+  **回退**：未安装直接走 Windows；合成失败/超时（180 s）自动回退 Windows 并记日志。
+  **回归 38 项全通过**（模块级 19 + 端到端 19）：三音色均为 24 kHz、缓存命中、
+  引擎切换后音频不同、试听音色可区分、配置与音色校验拒绝非法值、
+  静音 204 / 手动 200、过期 404、tts 日志仍不进执行日志、回复字节不受引擎影响。
+  **便携版冒烟**：无引擎时 `installed=false`、切 kokoro 返 400 `engine_not_installed`；
+  放入引擎目录后 `installed=true`（159 MB），Kokoro 试听 200 / 65 KB / 4 秒；关窗进程全退、临时文件清空。
+  **修复**：运行时 tar 字节数手写成 18,010,241（实际 18,893,451）导致长度校验永远失败、无限重试；
+  镜像重试时进度重复累加；`[hidden]` 被 `.row/.grid` 的 `display` 覆盖导致安装按钮装完仍显示；
+  两个引擎各自清理同一临时目录的竞态。详见 [tts.md](tts.md) §15。
+
+- **预置语音引擎与工坊分发（2026-11-12，0.19.0 收尾）**：按需求把 Kokoro 引擎预置进分发包，
+  并对「已下载就不重复下载」做启动期验证。
+  **源码目录**：`tts-engines/kokoro/`（10 个文件 / 159.2 MB，gitignore，不入库）。
+  **出包**：`scripts/dist.mjs` 新增 `syncTtsEngine()`，只在 `releases/tts-engines/` 缺失或不完整时
+  才从源码复制（10 个文件都得在），避免每次重拷 159 MB；实测首次 `缺 10 个文件` → `就绪 159.2 MB`，
+  再次打包 `已就绪，跳过复制`。
+  **工坊**：`workshop/publish.mjs` 放行并复制 `tts-engines/`，若存在但缺文件直接中止并列缺失项；
+  内容体积上限 100 MB → 400 MB，统计改为递归（此前只算顶层文件，漏掉 159 MB 引擎，
+  打出「内容总大小 95.4 MB」的错误数字）。实测 `--pack-only` 输出
+  `已预置语音引擎：tts-engines/（159.2 MB）`、内容总大小 **254.7 MB**，内容包结构
+  = exe 95.4 + 引擎 159.2 + README + LICENSE。
+  **启动检测**：`kokoro.isInstalled()` 检查 10 个文件均非空；齐备即 `kokoroInstalled=true` 且
+  `POST /api/tts/install` 直接返回 `alreadyInstalled`（不发起下载）。CLI 启动横幅新增
+  `语音引擎 : 已就绪（Kokoro 159 MB，目录 …\tts-engines\kokoro）`；`/api/status` 新增
+  `tts.engine / activeEngine / kokoroInstalled`。
+  **缺文件行为**：临时移走 `voices.bin` 后启动 → `kokoroInstalled=false`、`activeEngine=windows`、
+  占用显示 132 MB；恢复后自动回到 `true`。
+  **便携版冒烟**：exe 同层放引擎 → `kokoroInstalled=True`，Kokoro 男声试听 200 / 55 KB，关窗全退。
+  回归 **34 项全通过**（模块级 14 + 端到端 20），新增
+  `engine-dir-outside-data`、`partial-not-installed`、`install-noop-when-present`、`source-engine-exists`。
+  详见 [tts.md](tts.md) §16。

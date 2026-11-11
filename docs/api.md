@@ -14,10 +14,12 @@
 - `PUT /api/npcs/:slug/prompt`：保存该 NPC 个人提示词（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 prompt.json）。旧路由 `PUT /api/npcs/:slug/style` 保留为兼容别名
 - `POST /api/npcs/:slug/memory/rewrite`：按玩家一次性指令（`{prompt}`，上限 4000 字）用上游模型改写该 NPC 长期记忆，返回草稿 `{original,draft}`（**不落盘**；上游未配 Key 返 503）
 - `PUT /api/npcs/:slug/memory`：用草稿（`{text}`）覆盖该 NPC `memory.md`；覆盖前按时间戳备份到 `npcs/<slug>/backups/`，返回备份文件名
-- `GET /api/tts/voices`：系统中文语音清单（`{ok, voices:[{name,gender,language}], suggested:{male,female}, hint}`）。枚举要起一次 PowerShell，后端缓存 10 分钟；`?refresh=1` 强制刷新
+- `GET /api/tts/voices`：系统中文语音清单 + 引擎状态（`{ok, voices, suggested, engines:{current, configured, kokoro:{installed, bytes, downloadBytes, voices, state}}, hint}`）。枚举要起一次 PowerShell，后端缓存 10 分钟；`?refresh=1` 强制刷新
+- `POST /api/tts/install`：开始下载 Kokoro 引擎（运行时 + 模型，约 159MB）。**立即返回**，下载在后台进行；重复调用会返回 `already_running` 或 `alreadyInstalled`
+- `GET /api/tts/install`：安装状态与进度 `{installed, bytes, downloadBytes, state:{running, step, doneBytes, totalBytes, speedBps, error}}`，管理页每 800ms 轮询
 - `GET /api/tts/audio/:rid?mode=all|dialogue&auto=1&slug=<slug>`：按日志 `rid` 朗读该条 NPC 回复，返回 `audio/wav`。只接受 **NPC 对话**的详情（其它记录返 400 `not_npc_reply`）；`mode` 省略时用配置 `readMode`；`auto=1` 时该 NPC 已静音则返 **204**（手动播放不带 `auto`，不受任何静音开关影响）；详情过期返 404 `detail_not_found`；无文字可读返 400 `empty_text`/`not_plain_text`
-- `POST /api/tts/preview`：试听，`{text?, gender, voice?, rate?, pitch?}` → `audio/wav`；`text` 缺省用内置示例句，上限受 `tts.maxChars` 约束。**`voice` 指定具体音色名（管理页下拉框当前选中项），省略或不在系统清单里时按 `gender` 取配置默认音色**
-- `PUT /api/npcs/:slug/voice`：保存逐 NPC 语音设置 `{enabled, gender:'auto'|'male'|'female', rate, pitch}`（`rate`/`pitch` 传 `null` 表示跟随全局）；全默认值时不落盘，删除 `voice.json`
+- `POST /api/tts/preview`：试听，`{text?, engine?, gender, voice?, rate?, pitch?}` → `audio/wav`。`engine=kokoro` 时 `voice` 是 Kokoro 音色名（`zf_xiaoxiao` 等），否则是系统语音名；`text` 缺省用内置示例句，上限受 `tts.maxChars` 约束
+- `PUT /api/npcs/:slug/voice`：保存逐 NPC 语音设置 `{enabled, gender:'auto'|'male'|'female', rate, pitch, voice}`（`rate`/`pitch` 传 `null` 表示跟随全局；`voice` 是 Kokoro 音色名，只接受清单内的值，否则 400）；全默认值时不落盘，删除 `voice.json`
 - 游戏侧：`POST /v1/chat/completions`、`GET /v1/models`（需 API Key）；`GET /health` 免鉴权
 
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、
