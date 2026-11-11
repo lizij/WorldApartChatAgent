@@ -590,3 +590,26 @@
   回归 **34 项全通过**（模块级 14 + 端到端 20），新增
   `engine-dir-outside-data`、`partial-not-installed`、`install-noop-when-present`、`source-engine-exists`。
   详见 [tts.md](tts.md) §16。
+
+- **GitHub 单文件体积限制实测（2026-11-12，0.19.0）**：按「不做特殊处理、直接提交引擎」实测了一次 push，
+  确认硬限制真实存在：
+  ```
+  remote: error: File tts-engines/kokoro/model.int8.onnx is 108.91 MB;
+                 this exceeds GitHub's file size limit of 100.00 MB
+  remote: error: GH001: Large files detected.
+  remote: pre-receive hook declined
+   ! [remote rejected] main -> main (pre-receive hook declined)
+  ```
+  拒绝发生在**服务端 pre-receive hook**，远程分支未被污染（仍停在 `00c13c5`）。
+  → 改为**分片入库**（`model.int8.onnx.part00/01`，60 + 48.91 MiB），完整文件 gitignore。
+  **修复过程中发现的坑**：我曾误删 `.gitignore` 的其余条目（`.eb-cache`/`dist`/`releases`/`workshop`），
+  已立即恢复并逐个 `git check-ignore` 复核。
+  **分片推送结果**：成功（`00c13c5..bd5c3b5 main -> main`），只有一条建议性警告
+  `part00 is 60.00 MB; larger than GitHub's recommended maximum of 50.00 MB`（**是 warning，不阻断**）。
+  **从 GitHub 真实克隆验证**（`--depth 1`，27 秒）：
+  · 克隆后只有分片，无完整模型 → `isInstalled()` 触发自动拼回
+  · 拼回 114,202,993 字节，`sha256 = 75635ea3…34195e`，与下载清单**逐字节一致**
+  · 8 个模型文件全部与 `install.js` 的 sha256 清单匹配（**0 个不一致**），
+    证明 `.gitattributes` 的 `tts-engines/** -text` 确实阻止了 lexicon 被 CRLF 改写
+  · 直接合成成功：187 KB / 6.8 秒
+  → 结论：`git clone` 后**无需任何额外步骤**即可使用 Kokoro 引擎。
