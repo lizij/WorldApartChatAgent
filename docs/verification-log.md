@@ -613,3 +613,17 @@
     证明 `.gitattributes` 的 `tts-engines/** -text` 确实阻止了 lexicon 被 CRLF 改写
   · 直接合成成功：187 KB / 6.8 秒
   → 结论：`git clone` 后**无需任何额外步骤**即可使用 Kokoro 引擎。
+
+- **0.19.0 发版与创意工坊上线（2026-11-12）**：
+  · 重新出包 `WorldApartNpcAgent-0.19.0-win-portable.exe`（95.4 MB / 100,055,433 B），
+    FileVersion/ProductVersion 均为 0.19.0；冒烟：`kokoroInstalled=True`、Kokoro 男声试听 200 / 55 KB、关窗进程全退。
+  · 提交与 tag：`75d45f6` + 附注 tag `v0.19.0`，已推送；CI `build-win` **success**，
+    GitHub Release 已自动发布（asset：`WorldApartNpcAgent-0.19.0-win-portable.exe` 95.4 MB）。
+  · **创意工坊上传成功**：`steamcmd +login lizij163 +workshop_build_item`（steamcmd 有缓存凭据，无需交互）。
+    上传前发现并修掉一个冗余问题：内容包同时带上了分片与拼好的完整模型，体积虚高到 363.6 MB；
+    `publish.mjs` 现会在复制后删除 `model.int8.onnx.partNN` 与 `.assembling`，
+    包体回到 **254.7 MB**。
+  · **工坊体积配额实测结论**：该 App 接受 **254.7 MB**（267,044,013 B）单品，
+    未触发 100 MB 默认限制；`GetPublishedFileDetails` 返回 `result=1`、`visibility=0`(public)、
+    `time_updated` 为本次上传时间。→ 之前担心的「100 MB 上限」在本游戏不成立。
+  · 更新说明改用 `workshop/changenote.txt` 重写为 0.19.0 内容（原来还停留在 0.17.2 的旧文案）。
