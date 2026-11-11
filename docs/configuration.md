@@ -28,6 +28,13 @@
 | `multiNpc.autoStage` | **是否允许按台词自动进场/离场**（默认 `false`）。关闭时只认 `/invite`、`/add`、`/leave`、`/remove`，台词只作叙事事实；开启后才按括号动作/直呼其名调度 |
 | `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务轮**退化单人戏（`## 任务：X` 的标题既不是“闲聊”也不是“话题闲聊”时才算；`本次话题`/`收尾判定` 属于话题闲聊，不退化）/ 超时清场（默认 **120 分钟**，管理页按分钟填写） |
 | `multiNpc.actorTailWaitMs/actorMaxTokens/actorTimeoutMs` | 主角先说完时等待配角的上限（3s）/ 配角输出上限（300 tokens）/ 配角调用超时（20s） |
+| `tts.enabled` | **实验性**语音朗读总开关（默认 `false`）。开启后管理页对每条新到的 NPC 回复自动调用系统语音朗读。**关闭时不合成、不启动任何子进程**；历史回复不补播（日志里点 ▶ 可手动朗读）。声音由管理页播放，关窗即停 || `tts.readMode` | `all` 全部内容（含旁白）/ `dialogue` 只读引号内的对白；`dialogue` 抽不到引号时自动回退 `all` 并在界面提示 |
+| `tts.skipActions` | `all` 模式下是否跳过 `（…）`/`(…)` 动作描写（默认 `true`）。2026-11 游戏契约已改为 `content` 只写台词，该开关主要服务于旧日志与自建提示词场景 |
+| `tts.voices.male` / `tts.voices.female` | 全局男 / 女音色名（默认 `Microsoft Kangkang` / `Microsoft Huihui`）。取不到时回退到系统第一个同性别中文语音 |
+| `tts.defaultGender` | 性别判定失败时用哪个音色（`female`/`male`，默认 `female`） |
+| `tts.rate` / `tts.pitch` | 合成语速（0.5~3）/ 音调（0.5~2），默认 1.0；逐 NPC 可覆盖 |
+| `tts.volume` | **播放音量**（0~1，默认 0.8）：只在页面 `<audio>.volume` 生效，不参与合成、不进缓存 |
+| `tts.maxChars` | 单条朗读字数上限（默认 600）；超出按句切，不切半个词 |
 
 > **`maxMemoryChars` 必须与 `maxTokens` 匹配（重要）**：实测中文约 **1.4 汉字/token**，
 > 故有效上限 ≈ `maxTokens × 1.4`。上限若超过这个值，模型物理上写不出那么长——

@@ -65,11 +65,21 @@ export class Logger {
     this.#loadRecent();
   }
 
-  append(rec, detail) {
+  /**
+   * 追加一条日志。
+   * @param {object} rec 内容
+   * @param {object|null} detail 请求详情（可选）
+   * @param {{fileOnly?: boolean}} [opts] fileOnly=true 时**只写磁盘、不进内存缓冲、不推 SSE**，
+   *   用于高频且信息价值低的记录（如语音朗读成功），避免把执行日志刷屏、挤掉真正的对话记录。
+   *   这类记录仍可在 logs/YYYY-MM-DD.jsonl 里 grep。
+   */
+  append(rec, detail, opts = {}) {
     this.seq += 1;
     const now = new Date();
     const rid = `${dayKey(now)}-${this.runId}-${this.seq}`;
     const entry = { ...clampStrings(rec || {}), seq: this.seq, rid, ts: now.toISOString() };
+    // fileOnly 的记录带一个显式标记：启动回读历史日志时据此过滤，避免重启后又被加载进界面
+    if (opts.fileOnly) entry.uiHidden = true;
     if (detail) {
       entry.hasDetail = true;
       const clamped = clampStrings(detail, { left: DETAIL_MAX_CHARS });
@@ -79,12 +89,14 @@ export class Logger {
       }
       this.#persistDetail(rid, entry.ts, clamped);
     }
-    this.buffer.push(entry);
-    if (this.buffer.length > this.maxMemory) this.buffer.shift();
-    for (const fn of this.listeners) {
-      try {
-        fn(entry);
-      } catch {}
+    if (!opts.fileOnly) {
+      this.buffer.push(entry);
+      if (this.buffer.length > this.maxMemory) this.buffer.shift();
+      for (const fn of this.listeners) {
+        try {
+          fn(entry);
+        } catch {}
+      }
     }
     this.#persist(entry);
     return entry;
@@ -190,7 +202,12 @@ export class Logger {
         if (!line) continue;
         try {
           const rec = JSON.parse(line);
-          if (rec && typeof rec === 'object') out.push(rec);
+          if (!rec || typeof rec !== 'object') continue;
+          // 只落盘的记录（如语音朗读成功）不进界面。
+          // 兼容历史文件：0.18.0 之前的 tts 记录没有 uiHidden 标记，同样按 kind 过滤。
+          if (rec.uiHidden) continue;
+          if (rec.kind === 'tts' && rec.status !== 'error') continue;
+          out.push(rec);
         } catch {}
       }
     }

@@ -171,6 +171,27 @@ export function defaults() {
       memorySize: 1000,
       maxDays: 14,
     },
+    // 语音朗读（TTS）：用 Windows 内置语音（WinRT）离线合成，声音由管理页播放。
+    // 默认关闭——升级后不会突然出声；关闭时不会启动任何子进程、不产生任何日志。
+    // 详见 docs/tts.md。
+    tts: {
+      enabled: false,
+      // all = 全部内容；dialogue = 只读引号内的对白（没有引号时自动回退 all）
+      readMode: 'all',
+      // all 模式下是否跳过（括号动作）
+      skipActions: true,
+      // 全局男/女音色名（取不到时回退到系统第一个同性别中文语音）
+      voices: { male: 'Microsoft Kangkang', female: 'Microsoft Huihui' },
+      // 性别判定失败时用哪个音色
+      defaultGender: 'female',
+      // 合成参数（逐 NPC 可覆盖）
+      rate: 1.0,
+      pitch: 1.0,
+      // 播放音量：只在页面 <audio>.volume 生效，不参与合成与缓存
+      volume: 0.8,
+      // 单条朗读字数上限（超出按句截断）
+      maxChars: 600,
+    },
   };
 }
 

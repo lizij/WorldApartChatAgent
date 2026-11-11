@@ -9,6 +9,9 @@ let cleanedUp = false;
 
 app.setName('WorldApartNpcAgent');
 
+// 语音朗读：自动播放不能依赖用户手势（玩家在游戏里操作，不会点管理页）
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
 // 后端 esbuild 打包为 CJS（asar 内规避 ESM 加载问题）；静态页通过环境变量注入路径。
 process.env.WFC_PUBLIC_DIR = app.isPackaged
   ? path.join(process.resourcesPath, 'public')
@@ -45,6 +48,8 @@ function createWindow(port) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 窗口最小化时也保持自动朗读的计时与播放
+      backgroundThrottling: false,
     },
   });
   win.setMenuBarVisibility(false);

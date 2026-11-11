@@ -48,6 +48,17 @@ import { renderCard } from './cast/card.js';
 import { ContentInjector } from './cast/merge.js';
 import { loadStage, saveStage } from './cast/stage.js';
 import { entryOf, loadAliases, saveAliases, saveCastFlag } from './cast/registry.js';
+import {
+  speak,
+  synthesize,
+  listVoices,
+  resolveVoice,
+  readVoice,
+  saveVoice,
+  isVoiceEnabled,
+  reset as ttsReset,
+  shutdown as ttsShutdown,
+} from './tts/index.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
@@ -392,6 +403,8 @@ function strIn(v, maxLen) {
 
 export function createServer({ config, logger, getPortFallback = null }) {
   const queues = new KeyedQueue();
+  // 同一进程内可能再次创建服务（测试 / 重启）：复位上一轮 shutdown 留下的停止标志
+  ttsReset();
   const summarizer = new Summarizer({ config, logger, queue: queues });
   const rewriter = new MemoryRewriter({ config, queue: queues });
   const requestRewriter = new RequestRewriter({ config });
@@ -460,6 +473,13 @@ export function createServer({ config, logger, getPortFallback = null }) {
           maxCallsPerTurn: c.multiNpc.maxCallsPerTurn,
           outputStyle: c.multiNpc.outputStyle,
         },
+        // 只给开关与参数，语音清单另走 /api/tts/voices（枚举要起一次 PowerShell）
+        tts: {
+          enabled: !!c.tts.enabled,
+          readMode: c.tts.readMode,
+          skipActions: !!c.tts.skipActions,
+          defaultGender: c.tts.defaultGender,
+        },
       }),
     );
   }
@@ -479,6 +499,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
         prompts: { enabled: !!c.prompts.enabled, global: c.prompts.global || '' },
         requestRewrite: c.requestRewrite,
         multiNpc: c.multiNpc,
+        tts: c.tts,
         log: c.log,
         // 派生上限：maxMemoryChars 受 maxTokens 物理约束，供管理页做交叉校验提示
         limits: {
@@ -630,6 +651,38 @@ export function createServer({ config, logger, getPortFallback = null }) {
       const ato = intIn(m.actorTimeoutMs, 1000, 600000);
       if (ato !== undefined) safe.multiNpc.actorTimeoutMs = ato;
     }
+    // 语音朗读（TTS）
+    if (patch.tts && typeof patch.tts === 'object') {
+      safe.tts = {};
+      const t = patch.tts;
+      for (const k of ['enabled', 'skipActions']) {
+        if (t[k] !== undefined) safe.tts[k] = !!t[k];
+      }
+      if (t.readMode === 'all' || t.readMode === 'dialogue') safe.tts.readMode = t.readMode;
+      if (t.defaultGender === 'male' || t.defaultGender === 'female') safe.tts.defaultGender = t.defaultGender;
+      // 语音名：空串视为"回到默认"，仍按字符串收下（前端可能清空下拉）
+      if (t.voices && typeof t.voices === 'object') {
+        safe.tts.voices = {};
+        for (const g of ['male', 'female']) {
+          if (typeof t.voices[g] === 'string') safe.tts.voices[g] = t.voices[g].trim().slice(0, 200);
+        }
+      }
+      // 注意：volume/rate/pitch 都是小数，不能用 intIn（Math.floor 会把 0.8 压成 0）
+      const clampFloat = (v, min, max) => {
+        if (v === undefined || v === null || v === '' || typeof v === 'boolean') return undefined;
+        const n = Number(v);
+        if (!Number.isFinite(n)) return undefined;
+        return Math.round(Math.min(Math.max(n, min), max) * 100) / 100;
+      };
+      const mc = intIn(t.maxChars, 50, 5000);
+      if (mc !== undefined) safe.tts.maxChars = mc;
+      const vol = clampFloat(t.volume, 0, 1);
+      if (vol !== undefined) safe.tts.volume = vol;
+      const rate = clampFloat(t.rate, 0.5, 3);
+      if (rate !== undefined) safe.tts.rate = rate;
+      const pitch = clampFloat(t.pitch, 0.5, 2);
+      if (pitch !== undefined) safe.tts.pitch = pitch;
+    }
     config.update(safe);
     logger.append({ kind: 'config', status: 'updated' });
     res.setHeader('content-type', 'application/json; charset=utf-8');
@@ -676,6 +729,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
         aliases: loadAliases(ent.name),
         hasIntake: !!reg?.hasIntake,
         castEnabled: !!reg?.castEnabled,
+        voiceEnabled: readVoice(ent.name).enabled,
       });
     }
     out.sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
@@ -683,7 +737,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
     res.end(JSON.stringify({ npcs: out }));
   }
 
-  function handleNpcDetail(req, res, slugRaw) {
+  async function handleNpcDetail(req, res, slugRaw) {
     let slug;
     try {
       slug = decodeURIComponent(slugRaw);
@@ -717,6 +771,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
         conversations.push(JSON.parse(line));
       } catch {}
     }
+    const resolved = await resolveVoice(slug, cfg().tts);
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
@@ -729,6 +784,13 @@ export function createServer({ config, logger, getPortFallback = null }) {
         aliases: loadAliases(slug),
         hasIntake: !!entryOf(slug)?.hasIntake,
         castEnabled: !!entryOf(slug)?.castEnabled,
+        voice: readVoice(slug),
+        // 只回传前端要展示的字段：available 是完整语音清单，体积大且另有 /api/tts/voices
+        voiceResolved: {
+          gender: resolved.gender,
+          voiceName: resolved.voiceName,
+          reason: resolved.reason,
+        },
       }),
     );
   }
@@ -950,6 +1012,212 @@ export function createServer({ config, logger, getPortFallback = null }) {
     logger.append({ kind: 'memory_edit', slug, action: 'save', status: 'done', memoryChars: chars, backup });
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(JSON.stringify({ ok: true, backup, chars }));
+  }
+
+  // —— 语音朗读（TTS） ——
+
+  /**
+   * 语音朗读日志：**成功只落盘、不进界面**（fileOnly）。
+   * 朗读是高频动作，每播一条记一条会把执行日志刷屏，并把环形缓冲里真正的对话记录挤掉；
+   * 失败仍然进界面（数量少、有诊断价值）。落盘记录可在 logs/YYYY-MM-DD.jsonl 里 grep。
+   */
+  function logTts(rec) {
+    logger.append(rec, undefined, { fileOnly: rec.status !== 'error' });
+  }
+
+  /** 系统中文语音清单（枚举要起一次 PowerShell，缓存 10 分钟）。 */
+  async function handleTtsVoices(req, res, url) {
+    const force = url.searchParams.get('refresh') === '1';
+    const voices = await listVoices({ force });
+    const c = cfg();
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(
+      JSON.stringify({
+        ok: voices.length > 0,
+        voices,
+        suggested: {
+          male: voices.some((v) => v.name === c.tts.voices.male) ? c.tts.voices.male : null,
+          female: voices.some((v) => v.name === c.tts.voices.female) ? c.tts.voices.female : null,
+        },
+        hint: voices.length
+          ? ''
+          : '系统里没有可用的中文语音。请在 Windows「设置 → 时间和语言 → 语音」中添加中文语音包。',
+      }),
+    );
+  }
+
+  /**
+   * 按日志 rid 合成语音。
+   * 音色归属：detail.slug 优先；0.18.0 之前的旧日志没有该字段 → 用 ?slug= 兜底。
+   * ?slug= 来自 URL，属不可信输入，必须做路径校验。
+   */
+  async function handleTtsAudio(req, res, rid, url) {
+    let id;
+    try {
+      id = decodeURIComponent(rid);
+    } catch {
+      id = rid;
+    }
+    const detail = logger.getDetail(id);
+    if (!detail || typeof detail !== 'object') {
+      return sendJsonError(res, 404, 'detail_not_found', '详情已过期或不存在');
+    }
+    // 只允许 NPC 对话：记忆摘要 / 压缩器 / 探测的详情里也有 reply，
+    // 但它们不是"角色台词"，不应该被朗读（也避免被当成通用合成接口）。
+    if (detail.kind !== 'npc') {
+      return sendJsonError(res, 400, 'not_npc_reply', '这条记录不是 NPC 对话，无法朗读');
+    }
+
+    // 只有 NPC 对话才有可朗读的正文
+    let slug = typeof detail.slug === 'string' && detail.slug ? detail.slug : null;
+    if (!slug) {
+      const fromQuery = strIn(url.searchParams.get('slug'), 200);
+      if (fromQuery) {
+        const dir = path.join(NPCS_DIR, fromQuery);
+        if (dir.startsWith(NPCS_DIR + path.sep) && fs.existsSync(dir)) slug = fromQuery;
+      }
+    }
+
+    const auto = url.searchParams.get('auto') === '1';
+    // 自动朗读时尊重逐 NPC 静音；手动播放（点 ▶）不受任何开关限制
+    if (auto && !isVoiceEnabled(slug)) {
+      res.writeHead(204, { 'cache-control': 'no-store' });
+      return res.end();
+    }
+
+    const mode = url.searchParams.get('mode');
+    const raw = typeof detail.reply === 'string' ? detail.reply : '';
+    const c = cfg();
+    const started = Date.now();
+    let result;
+    try {
+      result = await speak({ raw, slug, cfg: c, mode });
+    } catch (err) {
+      result = { ok: false, reason: 'tts_powershell_failed', chars: 0, text: '', mode: 'all', voiceName: null, gender: 'female', detail: String(err?.message || err) };
+    }
+
+    const baseLog = {
+      kind: 'tts',
+      slug,
+      mode: result.mode,
+      chars: result.chars,
+      voice: result.voiceName,
+      gender: result.gender,
+      auto,
+      synthMs: result.synthMs ?? Date.now() - started,
+      cached: !!result.cached,
+    };
+
+    if (!result.ok) {
+      const reason = result.reason || 'tts_powershell_failed';
+      // 「这条没东西可读」是正常情况，不算故障：记 skipped，且不进界面
+      const benign = reason === 'empty_text' || reason === 'not_plain_text';
+      logTts({
+        ...baseLog,
+        status: benign || reason === 'tts_stopping' ? 'skipped' : 'error',
+        ...(benign ? { reason } : { error: result.detail ? `${reason}:${result.detail}` : reason }),
+      });
+      if (benign) {
+        return sendJsonError(res, 400, reason, '这条回复里没有可朗读的文字');
+      }
+      if (reason === 'tts_stopping') {
+        return sendJsonError(res, 503, reason, '程序正在退出');
+      }
+      return sendJsonError(res, 500, reason, '语音合成失败');
+    }
+
+    logTts({ ...baseLog, status: 'done', bytes: result.wav.length });
+    res.writeHead(200, {
+      'content-type': 'audio/wav',
+      'content-length': result.wav.length,
+      'cache-control': 'no-store',
+    });
+    res.end(result.wav);
+  }
+
+  /** 试听：不带 text 时用内置示例句。 */
+  async function handleTtsPreview(req, res) {
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    const c = cfg();
+    const gender = body?.gender === 'male' || body?.gender === 'female' ? body.gender : c.tts.defaultGender;
+    const maxChars = c.tts.maxChars || 600;
+    const text = (strIn(body?.text, maxChars) || '道友请留步。今日山门前的桃花开得正好，可否愿意与我同去看看？').trim();
+
+    const clampFloat = (v, min, max, fallback) => {
+      // Number(null)===0 / Number('')===0：先排除"没传"，否则会被夹到 min
+      if (v === null || v === undefined || v === '') return fallback;
+      const n = Number(v);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.round(Math.min(Math.max(n, min), max) * 100) / 100;
+    };
+    const rate = clampFloat(body?.rate, 0.5, 3, c.tts.rate);
+    const pitch = clampFloat(body?.pitch, 0.5, 2, c.tts.pitch);
+
+    // 试听不绑 NPC：优先用调用方明确指定的音色（管理页下拉框里选中的那个），
+    // 没指定才按性别取配置里的默认音色。
+    // 注意：不能只用 gender —— 那样换下拉框里的音色也永远听同一个声音。
+    const voices = await listVoices();
+    const explicit = strIn(body?.voice, 200);
+    const want = gender === 'male' ? c.tts.voices.male : c.tts.voices.female;
+    let voiceName = null;
+    if (explicit && voices.some((v) => v.name === explicit)) voiceName = explicit;
+    if (!voiceName && voices.some((v) => v.name === want)) voiceName = want;
+    if (!voiceName) voiceName = (voices.find((v) => v.gender === gender) || voices[0])?.name || null;
+    if (!voiceName) {
+      logTts({ kind: 'tts', status: 'error', error: 'tts_no_voice', action: 'preview' });
+      return sendJsonError(res, 400, 'tts_no_voice', '系统里没有可用的中文语音');
+    }
+
+    const started = Date.now();
+    const r = await synthesize({ text, voice: voiceName, rate, pitch });
+    if (!r.ok) {
+      logTts({
+        kind: 'tts',
+        status: 'error',
+        action: 'preview',
+        voice: voiceName,
+        chars: text.length,
+        error: r.detail ? `${r.reason}:${r.detail}` : r.reason,
+      });
+      return sendJsonError(res, 500, r.reason || 'tts_powershell_failed', '语音合成失败');
+    }
+    logTts({
+      kind: 'tts',
+      status: 'done',
+      action: 'preview',
+      voice: voiceName,
+      gender,
+      chars: text.length,
+      bytes: r.wav.length,
+      synthMs: r.synthMs ?? Date.now() - started,
+    });
+    res.writeHead(200, {
+      'content-type': 'audio/wav',
+      'content-length': r.wav.length,
+      'cache-control': 'no-store',
+    });
+    res.end(r.wav);
+  }
+
+  /** 保存逐 NPC 语音设置。 */
+  async function handlePutNpcVoice(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    let body;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
+    }
+    const next = saveVoice(hit.slug, body && typeof body === 'object' ? body : {});
+    logger.append({ kind: 'config', status: 'updated', slug: hit.slug, action: 'voice', voiceEnabled: next.enabled, gender: next.gender });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, voice: next }));
   }
 
   function handleEvents(req, res) {
@@ -1514,6 +1782,8 @@ export function createServer({ config, logger, getPortFallback = null }) {
       : null;
     const detail = {
       kind: 'npc',
+      // 语音朗读要按 NPC 选音色；baseLog 里有 slug，但 detail 是另一个对象，必须单独带上
+      slug: info.slug,
       turnId,
       request: requestMeta(finalBody),
       messages: buildDetailMessages(finalBody.messages, injected),
@@ -1922,6 +2192,13 @@ export function createServer({ config, logger, getPortFallback = null }) {
           return res.end(JSON.stringify({ ok: true, detail }));
         }
         if (normPath === '/api/events' && req.method === 'GET') return handleEvents(req, res);
+        // 语音朗读（TTS）
+        if (normPath === '/api/tts/voices' && req.method === 'GET') return await handleTtsVoices(req, res, url);
+        if (normPath === '/api/tts/preview' && req.method === 'POST') return await handleTtsPreview(req, res);
+        const mtts = normPath.match(/^\/api\/tts\/audio\/([^/]+)$/);
+        if (mtts && req.method === 'GET') return await handleTtsAudio(req, res, mtts[1], url);
+        const mvoice = normPath.match(/^\/api\/npcs\/([^/]+)\/voice$/);
+        if (mvoice && req.method === 'PUT') return await handlePutNpcVoice(req, res, mvoice[1]);
         if (normPath === '/api/npcs' && req.method === 'GET') return handleNpcList(req, res);
         // 外置提示词：/prompt 为正式路由，/style 保留为旧版兼容别名
         const ms = normPath.match(/^\/api\/npcs\/([^/]+)\/(prompt|style)$/);
@@ -1939,7 +2216,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
         const mp = normPath.match(/^\/api\/npcs\/([^/]+)\/memory$/);
         if (mp && req.method === 'PUT') return await handlePutMemory(req, res, mp[1]);
         const m = normPath.match(/^\/api\/npcs\/([^/]+)$/);
-        if (m && req.method === 'GET') return handleNpcDetail(req, res, m[1]);
+        if (m && req.method === 'GET') return await handleNpcDetail(req, res, m[1]);
         return sendJsonError(res, 404, 'not_found', '未知管理接口');
       }
 
@@ -1954,7 +2231,11 @@ export function createServer({ config, logger, getPortFallback = null }) {
   });
 
   // 空闲兜底：服务起来后开始定期扫描；随服务关闭而停止（定时器已 unref，不会拖住进程退出）
-  server.on('close', () => idleFlusher.stop());
+  server.on('close', () => {
+    idleFlusher.stop();
+    // 语音合成可能正在起 PowerShell：关服时必须杀掉，不能拖住进程退出
+    ttsShutdown();
+  });
   idleFlusher.start();
 
   return server;

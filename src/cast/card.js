@@ -9,7 +9,7 @@ import { NPCS_DIR } from '../memory/store.js';
 const CARD_TTL_MS = 60000;
 const cache = new Map(); // slug -> { at, file, card }
 
-function latestIntake(slug) {
+export function latestIntake(slug) {
   const dir = path.join(NPCS_DIR, slug, 'intake');
   let names = [];
   try {

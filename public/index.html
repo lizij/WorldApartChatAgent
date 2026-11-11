@@ -155,6 +155,53 @@
         <div class="row right"><button class="btn primary" id="saveRewrite">保存重写设置</button><span class="saved-hint" id="rwSaved"></span></div>
       </div>
     </div>
+
+    <div class="card">
+      <h2>语音朗读 <span class="tag warn">实验性</span></h2>
+      <div class="kv">
+        <label class="check"><input type="checkbox" id="ttsEnabled" /> 自动朗读新回复（默认关闭）</label>
+        <p class="hint">
+          使用 <strong>Windows 自带语音</strong>离线合成，免费、无需 Key、不联网；声音由本窗口播放，窗口最小化也能听到。
+          开启后，每条新到的 NPC 回复会自动朗读；关闭时<strong>完全不会合成</strong>，也不会启动任何系统进程。
+          历史回复不会补播——可在「执行日志」里点每条记录上的 ▶ 手动朗读。
+          ${''}
+        </p>
+        <p class="hint warn" id="ttsNotice" hidden></p>
+        <div class="grid two">
+          <label>朗读范围
+            <select id="ttsReadMode">
+              <option value="all">全部内容（含旁白）</option>
+              <option value="dialogue">仅对白（引号内台词）</option>
+            </select>
+          </label>
+          <label class="check" id="ttsSkipWrap"><input type="checkbox" id="ttsSkipActions" /> 跳过括号内的动作描写（如「（她抿了口茶）」）</label>
+        </div>
+        <div class="grid two">
+          <label>男声<select id="ttsVoiceMale"></select></label>
+          <label>女声<select id="ttsVoiceFemale"></select></label>
+        </div>
+        <div class="grid three advanced">
+          <label>语速<input type="number" id="ttsRate" min="0.5" max="3" step="0.05" /></label>
+          <label>音调<input type="number" id="ttsPitch" min="0.5" max="2" step="0.05" /></label>
+          <label>单条字数上限<input type="number" id="ttsMaxChars" min="50" max="5000" step="50" /></label>
+        </div>
+        <div class="grid two">
+          <label>播放音量<input type="number" id="ttsVolume" min="0" max="1" step="0.05" /></label>
+          <label>朗读默认音色（性别判定不出时）<select id="ttsDefaultGender">
+            <option value="female">女声</option>
+            <option value="male">男声</option>
+          </select></label>
+        </div>
+        <div class="row">
+          <button class="btn sm" id="ttsPreviewMale">男声试听</button>
+          <button class="btn sm" id="ttsPreviewFemale">女声试听</button>
+          <button class="btn sm" id="ttsRefreshVoices">重新检测语音</button>
+          <button class="btn sm" id="ttsStop">停止朗读</button>
+          <span class="saved-hint" id="ttsStatus"></span>
+        </div>
+        <div class="row right"><button class="btn primary" id="saveTts">保存语音设置</button><span class="saved-hint" id="ttsSaved"></span></div>
+      </div>
+    </div>
   </section>
 
   <!-- 日志 -->
@@ -193,6 +240,9 @@
     </div>
   </section>
 </main>
+
+<!-- 语音朗读共用播放器：自动播放与手动播放都走它 -->
+<audio id="ttsAudio" hidden></audio>
 
 <script src="app.js"></script>
 </body>

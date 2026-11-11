@@ -170,6 +170,17 @@ async function loadConfig() {
   $('#castWritesMemory').checked = !!cast.coStarWritesMemory;
   $('#castSkipOnTask').checked = cast.skipOnTask !== false;
   $('#castAutoStage').checked = !!cast.autoStage;
+  const tts = c.tts || {};
+  $('#ttsEnabled').checked = !!tts.enabled;
+  $('#ttsReadMode').value = tts.readMode === 'dialogue' ? 'dialogue' : 'all';
+  $('#ttsSkipActions').checked = tts.skipActions !== false;
+  $('#ttsRate').value = tts.rate ?? 1;
+  $('#ttsPitch').value = tts.pitch ?? 1;
+  $('#ttsVolume').value = tts.volume ?? 0.8;
+  $('#ttsMaxChars').value = tts.maxChars ?? 600;
+  $('#ttsDefaultGender').value = tts.defaultGender === 'male' ? 'male' : 'female';
+  updateTtsSkipVisibility();
+  initTtsPlayer(tts);
 }
 
 $('#saveUpstream').addEventListener('click', async () => {
@@ -287,6 +298,354 @@ function flashSaved(id, text) {
   setTimeout(() => (el.textContent = ''), 2500);
 }
 
+// ============================================================
+// 语音朗读（TTS）
+// 声音由本页 <audio> 播放；合成在后端按需触发（不点播放就零开销）。
+// 自动播放只认 SSE 新日志，不补播历史、不因日志筛选而失效。
+// ============================================================
+
+/** 自动播放水位：只播 seq 大于它的记录。 */
+let ttsSeqWatermark = 0;
+/** 已自动播过的 rid（手动播放不受限）。 */
+const ttsPlayed = new Set();
+/** 待播队列（最多 2 条，避免堆积）。 */
+const ttsQueue = [];
+let ttsPlaying = null; // { rid, objectUrl }
+let ttsVolume = 0.8;
+let ttsEnabledCache = false;
+
+function updateTtsSkipVisibility() {
+  const wrap = $('#ttsSkipWrap');
+  if (!wrap) return;
+  wrap.hidden = $('#ttsReadMode').value !== 'all';
+}
+
+/** 页面加载时用配置初始化播放器音量与自动播放状态。 */
+function initTtsPlayer(ttsCfg) {
+  ttsVolume = Number(ttsCfg?.volume ?? 0.8);
+  const audio = $('#ttsAudio');
+  if (audio) audio.volume = Math.min(Math.max(ttsVolume, 0), 1);
+  const turningOn = !!ttsCfg?.enabled && !ttsEnabledCache;
+  ttsEnabledCache = !!ttsCfg?.enabled;
+  // 刚打开自动朗读：从现在起算，历史回复不补播
+  if (turningOn) ttsSeqWatermark = currentMaxSeq();
+}
+
+function currentMaxSeq() {
+  let max = ttsSeqWatermark;
+  $$('#logList .log-item').forEach((el) => {
+    const seq = Number(el.dataset.seq);
+    if (Number.isFinite(seq) && seq > max) max = seq;
+  });
+  return max;
+}
+
+/** 取音频：fetch + blob（能读到 404/204/错误 JSON）。 */
+async function ttsFetch(rid, slug, { auto = false } = {}) {
+  const qs = new URLSearchParams();
+  if (slug) qs.set('slug', slug);
+  if (auto) qs.set('auto', '1');
+  const r = await fetch(`/api/tts/audio/${encodeURIComponent(rid)}?${qs.toString()}`);
+  if (r.status === 204) return null; // 该 NPC 已静音
+  if (!r.ok) {
+    let msg = `HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      msg = j?.error?.message || j?.message || msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  return r.blob();
+}
+
+/** 播放请求序号：换一条播放/停止时让在飞的 fetch 结果失效，避免旧结果抢占播放器。 */
+let ttsReqSeq = 0;
+
+function ttsStopInternal() {
+  ttsReqSeq += 1;
+  const audio = $('#ttsAudio');
+  if (ttsPlaying?.objectUrl) {
+    try {
+      URL.revokeObjectURL(ttsPlaying.objectUrl);
+    } catch {}
+  }
+  ttsPlaying = null;
+  resetActiveTtsButton();
+  if (audio) {
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load?.();
+  }
+}
+
+/** 当前播放中对应的日志按钮：换一条播放时要把上一条恢复成「▶ 播放」。 */
+let ttsActiveBtn = null;
+
+function resetActiveTtsButton() {
+  if (!ttsActiveBtn) return;
+  const btn = ttsActiveBtn;
+  btn.textContent = btn.dataset.label || '▶ 播放';
+  btn.dataset.playing = '';
+  btn.disabled = false;
+  ttsActiveBtn = null;
+}
+
+async function ttsPlay({ rid, slug, auto = false } = {}) {
+  ttsStopInternal();
+  const myId = ttsReqSeq;
+  let blob;
+  try {
+    blob = await ttsFetch(rid, slug, { auto });
+  } catch (err) {
+    if (myId !== ttsReqSeq) return false;
+    setTtsStatus('朗读失败：' + String(err.message || err), true);
+    return false;
+  }
+  // 合成期间玩家又点了别的（或按了停止）：丢弃这次结果
+  if (myId !== ttsReqSeq) return false;
+  if (!blob) {
+    // 204：该 NPC 已静音。自动播放时静默跳过，手动播放要告诉玩家原因
+    if (!auto) setTtsStatus('这个 NPC 已静音（可在「NPC 记忆」页开启）', true);
+    return false;
+  }
+  const audio = $('#ttsAudio');
+  if (!audio) return false;
+  const url = URL.createObjectURL(blob);
+  ttsPlaying = { rid, objectUrl: url };
+  audio.volume = Math.min(Math.max(ttsVolume, 0), 1);
+  audio.src = url;
+  try {
+    await audio.play();
+    return true;
+  } catch {
+    setTtsStatus('浏览器拦截了自动播放：点一下页面任意位置即可恢复', true);
+    return false;
+  }
+}
+
+function setTtsStatus(text, isError = false) {
+  const el = $('#ttsStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'saved-hint' + (isError ? ' warn' : '');
+}
+
+/** 队列推进：串行播放，不打断当前句。 */
+function ttsPump() {
+  if (ttsPlaying || !ttsQueue.length) return;
+  const job = ttsQueue.shift();
+  ttsPlay(job).then((ok) => {
+    if (!ok) {
+      ttsPlaying = null;
+      ttsPump();
+    }
+  });
+}
+
+$('#ttsAudio')?.addEventListener('ended', () => {
+  ttsStopInternal();
+  ttsPump();
+});
+
+/** SSE 新日志到达时调用：只有开自动朗读、且是新的 NPC 回复才播。 */
+function maybeAutoPlayTts(rec) {
+  const seq = Number(rec?.seq) || 0;
+  if (seq > ttsSeqWatermark) ttsSeqWatermark = seq;
+  if (!ttsEnabledCache) return;
+  if (rec?.kind !== 'npc' || rec?.status !== 'done') return;
+  if (!rec?.hasDetail || !(rec?.replyChars > 0)) return;
+  if (!rec?.rid || ttsPlayed.has(rec.rid)) return;
+  if (seq <= 0) return;
+  ttsPlayed.add(rec.rid);
+  // 防止长时间运行后 Set 无限增长
+  if (ttsPlayed.size > 500) ttsPlayed.delete(ttsPlayed.values().next().value);
+  ttsQueue.push({ rid: rec.rid, slug: rec.slug || null, auto: true });
+  while (ttsQueue.length > 2) ttsQueue.shift();
+  ttsPump();
+}
+
+// 手动播放（执行日志里的 ▶）
+async function ttsPlayFromLog(rec, btn) {
+  const prev = btn.textContent;
+  // 记住原始文案：换播放对象 / 播完时用它恢复
+  if (!btn.dataset.label) btn.dataset.label = prev;
+  btn.disabled = true;
+  btn.textContent = '合成中…';
+  const ok = await ttsPlay({ rid: rec.rid, slug: rec.slug || null, auto: false });
+  btn.disabled = false;
+  if (!ok) {
+    btn.textContent = btn.dataset.label;
+    btn.dataset.playing = '';
+    return;
+  }
+  btn.textContent = '■ 停止';
+  btn.dataset.playing = '1';
+  ttsActiveBtn = btn;
+}
+
+$('#ttsReadMode')?.addEventListener('change', updateTtsSkipVisibility);
+
+$('#ttsEnabled')?.addEventListener('change', async () => {
+  const on = $('#ttsEnabled').checked;
+  ttsEnabledCache = on;
+  if (on) ttsSeqWatermark = Math.max(ttsSeqWatermark, 0);
+  else {
+    ttsQueue.length = 0;
+    ttsStopInternal();
+  }
+  try {
+    await api('/api/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ tts: { enabled: on } }),
+    });
+    setTtsStatus(on ? '自动朗读已开启（只播之后的新回复）' : '自动朗读已关闭');
+  } catch (err) {
+    setTtsStatus('保存失败：' + String(err.message || err), true);
+  }
+});
+
+$('#saveTts')?.addEventListener('click', async () => {
+  const ttsPatch = {
+    readMode: $('#ttsReadMode').value,
+    skipActions: $('#ttsSkipActions').checked,
+    rate: Number($('#ttsRate').value),
+    pitch: Number($('#ttsPitch').value),
+    volume: Number($('#ttsVolume').value),
+    maxChars: Number($('#ttsMaxChars').value),
+    defaultGender: $('#ttsDefaultGender').value,
+  };
+  // 只有真正选到语音名时才写入，避免"未检测到系统语音"时把配置清空
+  const male = $('#ttsVoiceMale')?.value || '';
+  const female = $('#ttsVoiceFemale')?.value || '';
+  if (male) ttsPatch.voices = { ...(ttsPatch.voices || {}), male };
+  if (female) ttsPatch.voices = { ...(ttsPatch.voices || {}), female };
+
+  await api('/api/config', {
+    method: 'PUT',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ tts: ttsPatch }),
+  });
+  ttsVolume = Number($('#ttsVolume').value) || 0.8;
+  const audio = $('#ttsAudio');
+  if (audio) audio.volume = Math.min(Math.max(ttsVolume, 0), 1);
+  flashSaved('ttsSaved', '语音设置已保存');
+  loadConfig();
+});
+
+async function ttsPreview(gender) {
+  setTtsStatus('合成中…');
+  try {
+    // 必须把下拉框里当前选中的音色一起发过去，否则换音色也听不出区别
+    const sel = gender === 'male' ? $('#ttsVoiceMale') : $('#ttsVoiceFemale');
+    const voice = sel && sel.value ? sel.value : null;
+    const r = await fetch('/api/tts/preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        gender,
+        voice,
+        rate: Number($('#ttsRate').value),
+        pitch: Number($('#ttsPitch').value),
+      }),
+    });
+    if (!r.ok) {
+      let msg = `HTTP ${r.status}`;
+      try {
+        const j = await r.json();
+        msg = j?.error?.message || msg;
+      } catch {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    ttsStopInternal();
+    const audio = $('#ttsAudio');
+    const url = URL.createObjectURL(blob);
+    ttsPlaying = { rid: null, objectUrl: url };
+    audio.volume = Math.min(Math.max(ttsVolume, 0), 1);
+    audio.src = url;
+    await audio.play();
+    setTtsStatus('试听：' + (voice || (gender === 'male' ? '男声' : '女声')));
+  } catch (err) {
+    setTtsStatus('试听失败：' + String(err.message || err), true);
+  }
+}
+
+$('#ttsPreviewMale')?.addEventListener('click', () => ttsPreview('male'));
+$('#ttsPreviewFemale')?.addEventListener('click', () => ttsPreview('female'));
+$('#ttsRefreshVoices')?.addEventListener('click', async () => {
+  setTtsStatus('重新检测系统语音…');
+  await loadTtsVoices(true);
+  setTtsStatus('已重新检测（共 ' + ($('#ttsVoiceMale')?.options?.length || 0) + ' 个语音）');
+});
+$('#ttsStop')?.addEventListener('click', () => {
+  ttsQueue.length = 0;
+  ttsStopInternal();
+  setTtsStatus('已停止');
+});
+
+/** 打开实验功能页时才枚举系统语音（要起一次 PowerShell，约 0.4s）。 */
+let ttsVoicesLoaded = false;
+async function loadTtsVoices(force = false) {
+  if (ttsVoicesLoaded && !force) return;
+  const maleSel = $('#ttsVoiceMale');
+  const femaleSel = $('#ttsVoiceFemale');
+  try {
+    const d = await api('/api/tts/voices' + (force ? '?refresh=1' : ''));
+    ttsVoicesLoaded = true;
+    const voices = d.voices || [];
+    renderVoiceOptions(maleSel, voices, d.suggested?.male, 'male');
+    renderVoiceOptions(femaleSel, voices, d.suggested?.female, 'female');
+    const notice = $('#ttsNotice');
+    if (notice) {
+      if (!d.ok) {
+        notice.hidden = false;
+        notice.textContent = d.hint || '系统里没有可用的中文语音。';
+      } else {
+        notice.hidden = true;
+        notice.textContent = '';
+      }
+    }
+  } catch (err) {
+    // 读不到语音清单时至少给出可选项为空的下拉，避免 select 显示空白
+    renderVoiceOptions(maleSel, [], null, 'male');
+    renderVoiceOptions(femaleSel, [], null, 'female');
+    const notice = $('#ttsNotice');
+    if (notice) {
+      notice.hidden = false;
+      notice.textContent = '读取系统语音失败：' + String(err.message || err);
+    }
+  }
+}
+
+/** 填充性别下拉：优先用当前配置，其次同性别第一个，最后任意一个。 */
+function renderVoiceOptions(sel, voices, current, gender) {
+  if (!sel) return;
+  const prev = current || sel.value;
+  sel.innerHTML = '';
+  if (!voices.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '未检测到系统语音';
+    sel.appendChild(opt);
+    sel.disabled = true;
+    return;
+  }
+  sel.disabled = false;
+  for (const v of voices) {
+    const opt = document.createElement('option');
+    opt.value = v.name;
+    opt.textContent = `${v.name}（${v.gender === 'male' ? '男' : '女'} · ${v.language}）`;
+    sel.appendChild(opt);
+  }
+  const pick =
+    (prev && voices.some((v) => v.name === prev) ? prev : null) ||
+    (voices.find((v) => v.gender === gender) || voices[0]).name;
+  sel.value = pick;
+}
+
 $$('[data-copy]').forEach((btn) =>
   btn.addEventListener('click', async () => {
     const v = $('#' + btn.dataset.copy).value;
@@ -309,6 +668,7 @@ function activateTab(name, { remember = true } = {}) {
   const pane = $('#tab-' + key);
   if (pane) pane.classList.add('active');
   if (key === 'npcs') loadNpcs();
+  if (key === 'labs') loadTtsVoices();
   if (!remember) return;
   try {
     localStorage.setItem(TAB_KEY, key);
@@ -384,6 +744,7 @@ const KIND_LABELS = {
   memory_write: '记忆落盘',
   auth: '鉴权失败',
   server: '服务异常',
+  tts: '语音朗读',
 };
 
 const STATUS_LABELS = {
@@ -442,6 +803,14 @@ const ERROR_TEXT_LABELS = {
   stage_save_failed: '保存在场状态失败',
   cast_actor_failed: '配角请求失败',
   summary_failed: '记忆压缩失败',
+  tts_no_voice: '系统里没有可用的中文语音，请在 Windows 设置里添加',
+  tts_timeout: '语音合成超时（20 秒）',
+  tts_powershell_failed: '调用系统语音失败（可能被安全策略拦截）',
+  tts_empty_text: '这条回复里没有可朗读的文字',
+  tts_empty_audio: '系统语音返回了空音频（文本可能全是符号）',
+  tts_stopping: '程序正在退出，已跳过朗读',
+  not_plain_text: '回复里没有可朗读的纯文本',
+  empty_text: '这条回复里没有可朗读的文字',
 };
 
 function kindLabel(kind) {
@@ -838,6 +1207,7 @@ function renderLog(rec) {
   div.className = 'log-item ' + kindOf(rec);
   div.dataset.status = rec.status || '';
   div.dataset.rid = rec.rid || '';
+  div.dataset.seq = rec.seq == null ? '' : String(rec.seq);
   if (rec.hasDetail) div.classList.add('has-detail');
   let body = '';
 
@@ -936,6 +1306,19 @@ function renderLog(rec) {
   } else if (rec.kind === 'memory_write') {
     body = `<div class="log-line">${esc(rec.slug || '')} 记忆落盘 ${rec.status === 'error' ? '失败' : '完成'}</div>
       <div class="log-meta">${rec.error ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>` : ''}</div>`;
+  } else if (rec.kind === 'tts') {
+    // 成功的朗读只落盘、不进界面；能走到这里的只有失败，所以按异常渲染
+    const what = rec.action === 'preview' ? '试听' : '朗读';
+    body = `<div class="log-line warn">${esc(rec.slug || '')} ${what}失败</div>
+      <div class="log-meta">
+        ${rec.voice ? `<span>${esc(rec.voice)}</span>` : ''}
+        ${rec.chars != null ? `<span>${rec.chars} 字</span>` : ''}
+        ${
+          rec.error
+            ? `<span class="warn">${esc(errorTextLabel(rec.error))}<span class="log-code">${esc(rec.error)}</span></span>`
+            : ''
+        }
+      </div>`;
   } else {
     const st = statusLabel(rec.status);
     const errCn = rec.error ? errorTextLabel(rec.error) : '';
@@ -947,9 +1330,26 @@ function renderLog(rec) {
       }</div>`;
   }
 
+  const canPlay =
+    rec.kind === 'npc' && rec.status === 'done' && rec.hasDetail && Number(rec.replyChars) > 0;
   div.innerHTML = `<div class="log-head">${kindBadge(rec)}<span>${t}</span><span>#${rec.seq}</span>${
+    canPlay ? `<button class="btn sm log-play" type="button" title="朗读这条回复">▶ 播放</button>` : ''
+  }${
     rec.hasDetail ? '<span class="log-expand">详情 ▾</span>' : ''
   }</div><div class="log-body">${body}</div>`;
+
+  if (canPlay) {
+    const btn = div.querySelector('.log-play');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // 正在播这条：再点一次就是停止（ttsStopInternal 会恢复按钮文案）
+      if (btn.dataset.playing === '1') {
+        ttsStopInternal();
+        return;
+      }
+      ttsPlayFromLog(rec, btn);
+    });
+  }
 
   if (rec.hasDetail) {
     div.setAttribute('role', 'button');
@@ -1033,6 +1433,8 @@ function connectEvents() {
     if (msg.type === 'snapshot') {
       renderLogs(msg.records);
     } else if (msg.type === 'log') {
+      // 自动朗读必须先于 addLog：addLog 会因当前日志筛选而丢弃记录
+      maybeAutoPlayTts(msg.record);
       addLog(msg.record);
     }
   };
@@ -1054,7 +1456,7 @@ async function loadNpcs() {
     const name = n.rawNames[0] || n.slug;
     const g = n.lastGame || {};
     div.innerHTML = `
-      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.promptChars ? '<span class="tag">个人提示词</span>' : ''}${n.castEnabled ? '<span class="tag">共演已启用</span>' : ''}${(n.aliases || []).length ? '<span class="tag">别名 ' + n.aliases.length + '</span>' : ''}</div>
+      <div class="name">${esc(name)}${n.variants.length ? n.variants.map((v) => `<span class="tag">~${esc(v)}</span>`).join('') : ''}${n.promptChars ? '<span class="tag">个人提示词</span>' : ''}${n.castEnabled ? '<span class="tag">共演已启用</span>' : ''}${n.voiceEnabled === false ? '<span class="tag">已静音</span>' : ''}${(n.aliases || []).length ? '<span class="tag">别名 ' + n.aliases.length + '</span>' : ''}</div>
       <div class="sub">${n.turns} 轮 · ${g.relation ? esc(g.relation) + ' · ' : ''}${g.scene ? esc(g.scene) : ''} · ${new Date(n.lastSeen).toLocaleString('zh-CN', { hour12: false })}</div>`;
     div.addEventListener('click', () => {
       $$('.npc-item').forEach((x) => x.classList.remove('active'));
@@ -1126,6 +1528,24 @@ async function loadNpcDetail(slug, name) {
     <h4>共演：别名（每行一个，用于识别点名）</h4>
     <textarea id="npcAliases" rows="3" placeholder="例如：梦儿&#10;小弦娘">${esc((d.aliases || []).join('\n'))}</textarea>
     <div class="act-row"><button class="btn primary sm" id="saveAliases">保存别名</button><span class="saved-hint" id="aliasSaved"></span></div>
+    <h4>语音朗读（本 NPC）</h4>
+    <p class="hint">当前音色：<strong>${esc(d.voiceResolved?.voiceName || '未检测到系统语音')}</strong>
+      （${d.voiceResolved?.gender === 'male' ? '男声' : '女声'}）· 判定依据：${esc(d.voiceResolved?.reason || '')}</p>
+    <label class="check small"><input type="checkbox" id="npcVoiceEnabled" ${d.voice?.enabled !== false ? 'checked' : ''} /> 参与自动朗读（取消勾选即静音；手动点 ▶ 仍可播）</label>
+    <div class="grid three advanced">
+      <label>音色<select id="npcVoiceGender">
+        <option value="auto" ${(d.voice?.gender || 'auto') === 'auto' ? 'selected' : ''}>自动判定</option>
+        <option value="male" ${d.voice?.gender === 'male' ? 'selected' : ''}>强制男声</option>
+        <option value="female" ${d.voice?.gender === 'female' ? 'selected' : ''}>强制女声</option>
+      </select></label>
+      <label>语速（留空跟全局）<input type="number" id="npcVoiceRate" min="0.5" max="3" step="0.05" value="${d.voice?.rate ?? ''}" placeholder="跟随全局" /></label>
+      <label>音调（留空跟全局）<input type="number" id="npcVoicePitch" min="0.5" max="2" step="0.05" value="${d.voice?.pitch ?? ''}" placeholder="跟随全局" /></label>
+    </div>
+    <div class="act-row">
+      <button class="btn primary sm" id="saveNpcVoice">保存语音设置</button>
+      <button class="btn sm" id="previewNpcVoice">试听本 NPC</button>
+      <span class="saved-hint" id="npcVoiceSaved"></span>
+    </div>
     <h4>最近对话（最新在上）</h4>
     ${convs || '<p class="hint">暂无对话。</p>'}`;
   $('#saveNpcPrompt').addEventListener('click', async () => {
@@ -1176,6 +1596,65 @@ async function loadNpcDetail(slug, name) {
       loadNpcs();
     } catch (err) {
       $('#aliasSaved').textContent = '保存失败：' + String(err.message || err);
+    }
+  });
+
+  $('#saveNpcVoice').addEventListener('click', async () => {
+    const rateRaw = $('#npcVoiceRate').value.trim();
+    const pitchRaw = $('#npcVoicePitch').value.trim();
+    try {
+      await api('/api/npcs/' + encodeURIComponent(slug) + '/voice', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          enabled: $('#npcVoiceEnabled').checked,
+          gender: $('#npcVoiceGender').value,
+          // 空串 = 跟随全局：传 null 让服务端清掉覆盖
+          rate: rateRaw === '' ? null : Number(rateRaw),
+          pitch: pitchRaw === '' ? null : Number(pitchRaw),
+        }),
+      });
+      loadNpcs();
+      // 先重渲染详情（会重建提示元素），再写「已保存」，否则提示会被新元素覆盖掉
+      await loadNpcDetail(slug, name);
+      flashSaved('npcVoiceSaved', '已保存');
+    } catch (err) {
+      const el = $('#npcVoiceSaved');
+      if (el) el.textContent = '保存失败：' + String(err.message || err);
+    }
+  });
+
+  $('#previewNpcVoice').addEventListener('click', async () => {
+    const gender = $('#npcVoiceGender').value;
+    const isAuto = gender === 'auto';
+    const resolved = isAuto ? d.voiceResolved?.gender || 'female' : gender;
+    // 自动判定时用该 NPC 实际解析出的音色；手动指定时按性别取全局音色
+    const voice = isAuto ? d.voiceResolved?.voiceName || null : null;
+    const rateRaw = $('#npcVoiceRate').value.trim();
+    const pitchRaw = $('#npcVoicePitch').value.trim();
+    setTtsStatus('合成中…');
+    try {
+      const r = await fetch('/api/tts/preview', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          gender: resolved,
+          voice,
+          ...(rateRaw === '' ? {} : { rate: Number(rateRaw) }),
+          ...(pitchRaw === '' ? {} : { pitch: Number(pitchRaw) }),
+        }),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      ttsStopInternal();
+      const audio = $('#ttsAudio');
+      const url = URL.createObjectURL(blob);
+      ttsPlaying = { rid: null, objectUrl: url };
+      audio.src = url;
+      await audio.play();
+      setTtsStatus('试听：' + (voice || (resolved === 'male' ? '男声' : '女声')));
+    } catch (err) {
+      setTtsStatus('试听失败：' + String(err.message || err), true);
     }
   });
 

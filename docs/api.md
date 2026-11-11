@@ -7,13 +7,17 @@
 - `GET /api/events`：SSE，实时推送每条运行日志
 - `GET /api/logs?limit=`：最近日志（接口按时间正序返回；管理页展示时按时间倒序，最新在上）
 - `GET /api/logs/:rid/detail`：按日志的 `rid` 读取请求详情（完整 messages、reasoning、reply、usage；开启重写时含原始/重写后 system 与 diff；主日志只带 `hasDetail` 与 token 总数）
-- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、个人提示词与最近对话（含 `stage`、`aliases`、`hasIntake`、`castEnabled`）
+- `GET /api/npcs`、`GET /api/npcs/:slug`：NPC 名录、长期记忆、个人提示词与最近对话（含 `stage`、`aliases`、`hasIntake`、`castEnabled`、`voiceEnabled`；详情另带 `voice` 与 `voiceResolved:{gender,voiceName,reason}`）
 - `GET/DELETE /api/npcs/:slug/stage`：查看 / 清空该 NPC 的共演在场状态
 - `PUT /api/npcs/:slug/aliases`：保存别名（`{names: string[]}`，≤20 条、每条 ≤20 字），用于识别玩家点名
 - `GET/PUT /api/npcs/:slug/cast`：查看 / 设置该 NPC 是否允许作为配角（`{enabled:boolean}`，默认关闭；无 intake 时拒绝启用）
 - `PUT /api/npcs/:slug/prompt`：保存该 NPC 个人提示词（`{useGlobal,text}`；text 上限 4000 字，空文本且叠加全局时即删除 prompt.json）。旧路由 `PUT /api/npcs/:slug/style` 保留为兼容别名
 - `POST /api/npcs/:slug/memory/rewrite`：按玩家一次性指令（`{prompt}`，上限 4000 字）用上游模型改写该 NPC 长期记忆，返回草稿 `{original,draft}`（**不落盘**；上游未配 Key 返 503）
 - `PUT /api/npcs/:slug/memory`：用草稿（`{text}`）覆盖该 NPC `memory.md`；覆盖前按时间戳备份到 `npcs/<slug>/backups/`，返回备份文件名
+- `GET /api/tts/voices`：系统中文语音清单（`{ok, voices:[{name,gender,language}], suggested:{male,female}, hint}`）。枚举要起一次 PowerShell，后端缓存 10 分钟；`?refresh=1` 强制刷新
+- `GET /api/tts/audio/:rid?mode=all|dialogue&auto=1&slug=<slug>`：按日志 `rid` 朗读该条 NPC 回复，返回 `audio/wav`。只接受 **NPC 对话**的详情（其它记录返 400 `not_npc_reply`）；`mode` 省略时用配置 `readMode`；`auto=1` 时该 NPC 已静音则返 **204**（手动播放不带 `auto`，不受任何静音开关影响）；详情过期返 404 `detail_not_found`；无文字可读返 400 `empty_text`/`not_plain_text`
+- `POST /api/tts/preview`：试听，`{text?, gender, voice?, rate?, pitch?}` → `audio/wav`；`text` 缺省用内置示例句，上限受 `tts.maxChars` 约束。**`voice` 指定具体音色名（管理页下拉框当前选中项），省略或不在系统清单里时按 `gender` 取配置默认音色**
+- `PUT /api/npcs/:slug/voice`：保存逐 NPC 语音设置 `{enabled, gender:'auto'|'male'|'female', rate, pitch}`（`rate`/`pitch` 传 `null` 表示跟随全局）；全默认值时不落盘，删除 `voice.json`
 - 游戏侧：`POST /v1/chat/completions`、`GET /v1/models`（需 API Key）；`GET /health` 免鉴权
 
 日志记录包含：类型、slug、sessionId、玩家发言摘要、回复预览、首字节/内容首字/总耗时、
@@ -29,6 +33,16 @@
   与非流式的 `reply_not_json` 区分；另有 `rewrite_skipped:mixed_fact_module`：某条消息把事实块
   与 `## 设定` 混在一起，已整条透传（该设定本轮不会被改写）。
 - `notes` 的 `reply_wrapped_json`：非流式纯文本回复已按当轮模板包成 JSON（中性提示，不标红）。
+
+语音朗读（`kind:"tts"`）字段：`slug` / `mode`（`all`/`dialogue`）/ `chars` / `voice` /
+`gender` / `auto` / `synthMs` / `cached` / `bytes` / `action`（`preview` 表示试听）/
+`status` / `error`。错误码：`tts_no_voice`、`tts_timeout`、`tts_powershell_failed`、
+`tts_empty_text`、`tts_empty_audio`、`tts_stopping`。**日志里不记录台词正文**。
+
+> **语音朗读的成功记录只落盘（带 `uiHidden:true`），不会出现在执行日志里**：
+> 朗读是高频动作，每播一条记一条会刷屏并把环形缓冲里真正的对话记录挤掉。
+> 失败记录（`status:"error"`）仍会显示在「仅异常」里。落盘记录可直接
+> `grep '"kind":"tts"' data*/logs/<日期>.jsonl` 查看。
 
 > **日志码与界面文案**：日志文件（`logs/YYYY-MM-DD.jsonl`）里 `kind` / `status` / `warnings` /
 > `rewrite.error` 一律写**英文码**（如 `cast_stage_cleared:idle`、`memory_over_limit:3266>3000`），

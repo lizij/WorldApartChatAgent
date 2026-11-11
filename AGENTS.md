@@ -52,6 +52,9 @@
       - state.json 更新（轮次、最近游戏状态）
       - 每 N 轮一次非流式短调用，合并压缩重写 memory.md
       - 空闲兜底：该 NPC 空闲超时且记忆仍有落后轮次时补压一次（后台每 5s 扫描）
+   ⑦.5 【可选·实验性】语音朗读：日志经 SSE 推到管理页，页面按需请求
+      `GET /api/tts/audio/<rid>` → 后端用 Windows 内置语音（WinRT）合成 WAV →
+      页面 <audio> 播放。**不点播放就不合成**，回复路径与字节完全不受影响
    ▼
 真实 Provider（默认 https://api.deepseek.com → deepseek-flash）
 ```
@@ -196,6 +199,11 @@ WorldApartProject/
 │  │  └─ merge.js             # 台词 JSON 转义 + 流内插入（content 内）
 │  ├─ locks.js                # 按 NPC 串行队列
 │  ├─ log.js                  # 环形缓冲（SSE 推送）+ 按天 JSONL
+│  ├─ tts/                    # 【实验性】语音朗读（Windows 内置语音，离线免费）
+│  │  ├─ text.js              # JSON 兜底解包 → 去 markdown → 按模式抽取 → 按句截断
+│  │  ├─ voice.js             # 系统语音枚举（10min 缓存）、音色解析、逐 NPC 设置、性别判定
+│  │  ├─ synth.js             # PowerShell + WinRT 合成 WAV（并发 2 / 20s 超时 / LRU / 可 kill）
+│  │  └─ index.js             # 门面：文本 + 音色 + 合成
 │  └─ memory/
 │     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照、逐 NPC 提示词
 │     ├─ inject.js            # 长期记忆 / 外置设定提示词注入文本组装
@@ -211,12 +219,14 @@ WorldApartProject/
 data/  或  data_test/
 ├─ config.json
 ├─ rewrite-cache-exact.json   # 机制 1 全局 LRU 缓存（默认 1000 条，防抖落盘）
-├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / memory_edit / config / server / auth
+├─ logs/YYYY-MM-DD.jsonl      # npc / compressor / probe / summary / idle_flush / memory_write / memory_edit / config / server / auth / tts（tts 成功只落盘，不进执行日志）
 ├─ logs/details/YYYY-MM-DD.jsonl # 请求详情（完整 prompt / 思维链 / 回复 / usage），保留 14 天
+├─ tmp/tts/                   # 语音合成临时目录（job.json / *.wav，用完即删；启动首次使用时清空）
 └─ npcs/<slug>/
    ├─ state.json              # slug/sessionId/名称变体/轮次/摘要水位/最近游戏状态
    ├─ memory.md               # 长期记忆（摘要器重写；回复前注入）
    ├─ prompt.json             # 该 NPC 个人提示词 {useGlobal,text}（可选；回复前注入）
+   ├─ voice.json              # 逐 NPC 语音设置 {enabled,gender,rate,pitch}（可选；缺失=跟随全局）
    ├─ aliases.json            # 玩家可编辑的别名 {names:[]}（可选；共演点名识别用）
    ├─ cast.json               # 是否允许作为配角参与共演 {enabled:true}（可选；缺失=关闭）
    ├─ stage.json              # 共演在场状态 {sceneKey,onStage,updatedAt}（可选）
@@ -255,7 +265,7 @@ data/  或  data_test/
 
 ## 5. 管理接口（仅本机，无需游戏 Key）
 
-游戏侧 `POST /v1/chat/completions`、`GET /v1/models`（需 API Key），`GET /health` 免鉴权；管理侧提供状态、配置、SSE 日志、日志详情、NPC 记忆/提示词/别名/共演在场与记忆改写等接口，均只接受本机访问。
+游戏侧 `POST /v1/chat/completions`、`GET /v1/models`（需 API Key），`GET /health` 免鉴权；管理侧提供状态、配置、SSE 日志、日志详情、NPC 记忆/提示词/别名/共演在场、语音朗读（语音清单/按 rid 合成/试听/逐 NPC 音色）与记忆改写等接口，均只接受本机访问。
 
 > 完整接口清单、参数与日志字段见 [docs/api.md](docs/api.md)。
 
@@ -276,6 +286,10 @@ data/  或  data_test/
   打包 exe 以 `--test` + 假上游跑通真机链路（21 项：事实模块不透传、注入顺序、缓存命中、状态落盘）。
   正式交付版本号为 **0.17.2**（0.17.1 的中间产物被同一版本号的多次构建覆盖过，故统一升位后重新出包）。
 - 已知结论：中文约 1.4 汉字/token；调大 `maxMemoryChars` 不会让记忆变长；默认不干涉思考才与裸模型一致。
+- 0.18.0：新增**语音朗读**（Windows 内置 WinRT 语音，离线免费、零新增依赖）。默认关闭；
+  开启后管理页自动朗读新到的 NPC 回复，执行日志每条可点 ▶ 手动朗读。文本清洗 / 性别判定 /
+  音色解析 / 合成链路 / 四个管理接口 / 逐 NPC 音色 均有模块级与端到端回归（详见
+  [docs/tts.md](docs/tts.md) 与 [docs/verification-log.md](docs/verification-log.md)）。
 
 > 逐条验证证据、修过的缺陷与排障手册见 [docs/verification-log.md](docs/verification-log.md)。
 

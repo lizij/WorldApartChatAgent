@@ -83,6 +83,11 @@
 11. **安全默认值**：日志与接口中的密钥一律掩码；管理接口仅接受本机访问（`127.0.0.1`/`::1`）；
     游戏侧接口必须校验 API Key（`src/server.js` 的 `authed()`）。
 12. **不要再造路由框架**：`node:http` 手写路由已足够，不要为几个接口引入 Express/Fastify。
+13. **子进程只允许用于语音朗读**：`src/tts/synth.js` 是仓库里唯一的 `child_process` 用法
+    （中文男声只有 WinRT 注册，Node 无零依赖直连方案，只能借一次 `powershell.exe`）。
+    约束：脚本内联为字符串常量、文本与音色只走 job 文件（路径从环境变量传入，
+    **不拼命令行**）、必须有 20s 超时、**必须能被 `shutdown()` 杀掉**（挂在
+    `server.on('close')`，见约束 7）。不要在别处新增 `child_process`/`spawn`。
 
 ---
 
