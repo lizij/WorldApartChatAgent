@@ -177,13 +177,15 @@ export function defaults() {
     tts: {
       enabled: false,
       // 引擎：windows（系统自带语音，零下载、极快）/ kokoro（离线神经语音，需下载约 156MB）
-      // kokoro 未安装或调用失败时自动回退 windows
+      // kokoro 未安装或合成失败时报错跳过本条，不换引擎（见 docs/tts.md §19）
       engine: 'windows',
       // all = 全部内容；dialogue = 只读引号内的对白（没有引号时自动回退 all）
       readMode: 'all',
       // all 模式下是否跳过（括号动作）
       skipActions: true,
-      // 全局男/女音色名（Windows 引擎用；取不到时回退到系统第一个同性别中文语音）
+      // 全局男/女音色名（Windows 引擎用）。配了就必须用它：
+      // 取不到时报错跳过本条朗读，不会退到其它语音（见 docs/tts.md §19）。
+      // 注意：首次运行若系统里没有这两个名字，界面会标注「已失效，请重选」。
       voices: { male: 'Microsoft Kangkang', female: 'Microsoft Huihui' },
       // 性别判定失败时用哪个音色
       defaultGender: 'female',

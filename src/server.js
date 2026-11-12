@@ -64,7 +64,7 @@ import {
   isKokoroInstalled,
   KOKORO_VOICES,
   ENGINE_IDS,
-  activeEngine,
+  pickKokoroVoice,
 } from './tts/index.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -484,8 +484,10 @@ export function createServer({ config, logger, getPortFallback = null }) {
         tts: {
           enabled: !!c.tts.enabled,
           engine: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
-          // 实际生效的引擎（kokoro 未安装会自动降到 windows）
-          activeEngine: activeEngine(c),
+          // 引擎不再静默降级：activeEngine 就是配置里的那个，
+          // 是否真的能用看 engineReady（缺引擎时朗读会报错，见 docs/tts.md §19）。
+          activeEngine: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
+          engineReady: c.tts.engine === 'kokoro' ? isKokoroInstalled() : true,
           kokoroInstalled: isKokoroInstalled(),
           readMode: c.tts.readMode,
           skipActions: !!c.tts.skipActions,
@@ -807,17 +809,18 @@ export function createServer({ config, logger, getPortFallback = null }) {
     }
     const c0 = cfg();
     const resolved = await resolveVoice(slug, c0.tts);
-    // Kokoro 引擎下，实际音色名与 gender 取自 Kokoro 音色表；否则沿用系统语音
-    const kokoroOn = activeEngine(c0) === 'kokoro';
+    // 「配置里写的引擎」而不是「当前可用引擎」：Kokoro 缺失时不能让详情页
+    // 假装成系统语音（那等于静默换音色，见 docs/tts.md §19）。
+    const engineConfigured = c0.tts.engine === 'kokoro' ? 'kokoro' : 'windows';
     const perVoice = readVoice(slug);
     const kGender =
       perVoice.gender === 'male' || perVoice.gender === 'female'
         ? perVoice.gender
         : resolved.gender;
-    const kVoice =
-      (perVoice.voice && KOKORO_VOICES.find((v) => v.name === perVoice.voice)) ||
-      KOKORO_VOICES.find((v) => v.name === (kGender === 'male' ? c0.tts.kokoro.voiceMale : c0.tts.kokoro.voiceFemale)) ||
-      KOKORO_VOICES[0];
+    const picked = pickKokoroVoice(slug, c0, kGender);
+    const kokoroProblem = !isKokoroInstalled()
+      ? { code: 'engine_unavailable', detail: 'Kokoro 引擎缺失（tts-engines/kokoro）。朗读会报错，不会改用系统语音。' }
+      : picked.problem;
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
@@ -831,19 +834,24 @@ export function createServer({ config, logger, getPortFallback = null }) {
         hasIntake: !!entryOf(slug)?.hasIntake,
         castEnabled: !!entryOf(slug)?.castEnabled,
         voice: readVoice(slug),
-        engine: kokoroOn ? 'kokoro' : 'windows',
+        engine: engineConfigured,
+        engineReady: engineConfigured === 'kokoro' ? isKokoroInstalled() : true,
         // 只回传前端要展示的字段：available 是完整语音清单，体积大且另有 /api/tts/voices
-        voiceResolved: kokoroOn
+        voiceResolved: engineConfigured === 'kokoro'
           ? {
-              gender: kVoice.gender,
-              voiceName: kVoice.name,
-              voiceLabel: kVoice.label,
-              reason: perVoice.voice ? '该 NPC 指定了 Kokoro 音色' : `按${kVoice.gender === 'male' ? '男' : '女'}声取全局默认`,
+              gender: picked.voice ? picked.voice.gender : kGender,
+              voiceName: picked.voice ? picked.voice.name : null,
+              voiceLabel: picked.voice ? picked.voice.label : null,
+              reason: picked.voice
+                ? (perVoice.voice ? '该 NPC 指定了 Kokoro 音色' : `按${picked.voice.gender === 'male' ? '男' : '女'}声取全局默认`)
+                : '音色不可用',
+              ...(kokoroProblem ? { problem: kokoroProblem } : {}),
             }
           : {
               gender: resolved.gender,
               voiceName: resolved.voiceName,
               reason: resolved.reason,
+              ...(resolved.problem ? { problem: resolved.problem } : {}),
             },
       }),
     );
@@ -1096,8 +1104,14 @@ export function createServer({ config, logger, getPortFallback = null }) {
         },
         // 引擎与音色清单（前端据此渲染下拉与安装按钮）
         engines: {
-          current: activeEngine(c),
+          // current 与 configured 相同：引擎不再静默降级，缺失时由 UI 明确提示
+          current: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
           configured: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
+          // 配置的音色是否仍然存在（前端用于显示「已失效」，而不是换成第一个）
+          voicesAvailable: {
+            male: voices.some((v) => v.name === c.tts.voices.male),
+            female: voices.some((v) => v.name === c.tts.voices.female),
+          },
           kokoro: {
             installed: kstatus.installed,
             bytes: kstatus.bytes,
@@ -1206,13 +1220,14 @@ export function createServer({ config, logger, getPortFallback = null }) {
       auto,
       synthMs: result.synthMs ?? Date.now() - started,
       cached: !!result.cached,
-      ...(result.engineFallback ? { engineFallback: result.engineFallback } : {}),
     };
 
     if (!result.ok) {
       const reason = result.reason || (result.engine === 'kokoro' ? 'kokoro_failed' : 'tts_powershell_failed');
       // 「这条没东西可读」是正常情况，不算故障：记 skipped，且不进界面
       const benign = reason === 'empty_text' || reason === 'not_plain_text';
+      // 音色/引擎不可用是**配置问题**，不是合成故障：明确报 409，绝不换音色顶上。
+      const unavailable = reason === 'voice_unavailable' || reason === 'engine_unavailable' || reason === 'tts_no_voice';
       logTts({
         ...baseLog,
         status: benign || reason === 'tts_stopping' ? 'skipped' : 'error',
@@ -1223,6 +1238,9 @@ export function createServer({ config, logger, getPortFallback = null }) {
       }
       if (reason === 'tts_stopping') {
         return sendJsonError(res, 503, reason, '程序正在退出');
+      }
+      if (unavailable) {
+        return sendJsonError(res, 409, reason, result.detail || '所选音色不可用');
       }
       return sendJsonError(res, 500, reason, '语音合成失败');
     }
@@ -1264,16 +1282,27 @@ export function createServer({ config, logger, getPortFallback = null }) {
     // 注意：不能只用 gender —— 那样换下拉框里的音色也永远听同一个声音。
     //
     // engine=kokoro 时 voice 是 Kokoro 音色名（zf_xiaoxiao 等）；否则是系统语音名。
-    const wantEngine = body?.engine === 'kokoro' ? 'kokoro' : body?.engine === 'windows' ? 'windows' : activeEngine(c);
+    const wantEngine = body?.engine === 'kokoro' ? 'kokoro' : body?.engine === 'windows' ? 'windows' : (c.tts.engine === 'kokoro' ? 'kokoro' : 'windows');
     const started = Date.now();
 
     if (wantEngine === 'kokoro') {
       if (!isKokoroInstalled()) {
         return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装');
       }
-      const explicitK = KOKORO_VOICES.find((v) => v.name === strIn(body?.voice, 40));
+      // 调用方明确点了某个音色就必须用它；点了却不存在 → 报错，不替换成别的音色
+      const asked = strIn(body?.voice, 40);
+      const explicitK = asked ? KOKORO_VOICES.find((v) => v.name === asked) : null;
       const defK = gender === 'male' ? c.tts.kokoro.voiceMale : c.tts.kokoro.voiceFemale;
-      const voice = explicitK || KOKORO_VOICES.find((v) => v.name === defK) || KOKORO_VOICES[0];
+      let voice = explicitK;
+      if (!voice && asked) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', error: `voice_unavailable:${asked}` });
+        return sendJsonError(res, 409, 'voice_unavailable', `所选 Kokoro 音色「${asked}」不可用，请重新选择`);
+      }
+      if (!voice) voice = KOKORO_VOICES.find((v) => v.name === defK);
+      if (!voice) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', error: `voice_unavailable:${defK || '(未配置)'}` });
+        return sendJsonError(res, 409, 'voice_unavailable', `配置的 Kokoro 音色「${defK || '未配置'}」不可用，请重新选择`);
+      }
       const r = await synthesizeKokoro({ text, voice: voice.name, rate, threads: c.tts.kokoro.threads });
       if (!r.ok) {
         logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', voice: voice.name, chars: text.length, error: r.detail ? `${r.reason}:${r.detail}` : r.reason });
@@ -1288,8 +1317,22 @@ export function createServer({ config, logger, getPortFallback = null }) {
     const explicit = strIn(body?.voice, 200);
     const want = gender === 'male' ? c.tts.voices.male : c.tts.voices.female;
     let voiceName = null;
-    if (explicit && voices.some((v) => v.name === explicit)) voiceName = explicit;
-    if (!voiceName && voices.some((v) => v.name === want)) voiceName = want;
+    if (explicit) {
+      // 调用方点了某个系统语音就必须用它；不存在 → 报错，不替换
+      if (!voices.some((v) => v.name === explicit)) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${explicit}` });
+        return sendJsonError(res, 409, 'voice_unavailable', `所选系统语音「${explicit}」不可用，请重新选择`);
+      }
+      voiceName = explicit;
+    }
+    if (!voiceName && want) {
+      if (!voices.some((v) => v.name === want)) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${want}` });
+        return sendJsonError(res, 409, 'voice_unavailable', `配置的${gender === 'male' ? '男' : '女'}声音色「${want}」不可用，请重新选择`);
+      }
+      voiceName = want;
+    }
+    // 到这里说明调用方没指定音色（或配置里为空），才按性别自动挑
     if (!voiceName) voiceName = (voices.find((v) => v.gender === gender) || voices[0])?.name || null;
     if (!voiceName) {
       logTts({ kind: 'tts', status: 'error', error: 'tts_no_voice', action: 'preview' });

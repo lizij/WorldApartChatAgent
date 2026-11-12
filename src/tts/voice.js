@@ -225,8 +225,14 @@ export function detectGender(slug) {
 
 /**
  * 解析某个 NPC 最终要用的音色。
- * 优先级：逐 NPC 指定 → 全局 male/female → 系统第一个中文语音。
- * @returns {Promise<{gender:string, voiceName:string|null, reason:string, available:Array}>}
+ * 优先级：全局 male/female → 同性别第一个。
+ *
+ * **红线：用户显式选过音色名，就只认那一个。** 找不到时返回 `problem`
+ * 而不是换成别的音色——静默换人会让玩家在对话中途听到另一个人的声音，
+ * 比没有声音更糟（见 docs/tts.md §19）。
+ * 只有「用户从没指定音色」时才按性别自动挑。
+ *
+ * @returns {Promise<{gender:string, voiceName:string|null, reason:string, available:Array, problem:{code:string, detail:string}|null}>}
  */
 export async function resolveVoice(slug, cfg) {
   const voices = await listVoices();
@@ -249,25 +255,72 @@ export async function resolveVoice(slug, cfg) {
     }
   }
 
-  const candidates = [];
-  if (gender === 'male') {
-    if (globalVoices.male) candidates.push(globalVoices.male);
-  } else if (globalVoices.female) candidates.push(globalVoices.female);
-
-  let voiceName = null;
-  for (const c of candidates) {
-    if (voices.some((v) => v.name === c)) {
-      voiceName = c;
-      break;
+  // 全局男/女声默认。只要用户配了名字，就必须用它；配了却找不到 → 报错，不替换。
+  const configured = String((gender === 'male' ? globalVoices.male : globalVoices.female) || '').trim();
+  const genderWord = gender === 'male' ? '男' : '女';
+  if (configured) {
+    if (voices.some((v) => v.name === configured)) {
+      return {
+        gender,
+        voiceName: configured,
+        reason: `${reason}；使用你选择的音色「${configured}」`,
+        available: voices,
+        problem: null,
+      };
     }
+    return {
+      gender,
+      voiceName: null,
+      reason,
+      available: voices,
+      problem: {
+        code: 'voice_unavailable',
+        detail:
+          `你选择的${genderWord}声音色「${configured}」已不在系统语音列表里` +
+          '（可能被卸载，或更换了系统语言包）。程序不会改用其它音色；' +
+          '请到「实验功能 → 音色」重新选择。',
+      },
+    };
   }
-  if (!voiceName) {
-    const sameGender = voices.find((v) => v.gender === gender);
-    voiceName = (sameGender || voices[0])?.name || null;
-  }
-  if (!voiceName) reason += '；系统里没有中文语音';
 
-  return { gender, voiceName, reason, available: voices };
+  // 以下都是「用户没指定音色名」的情形，可以按性别自动挑。
+  const sameGender = voices.find((v) => v.gender === gender);
+  if (sameGender) {
+    return { gender, voiceName: sameGender.name, reason: `${reason}；按性别自动选中`, available: voices, problem: null };
+  }
+
+  if (!voices.length) {
+    return {
+      gender,
+      voiceName: null,
+      reason: `${reason}；系统里没有可用的中文语音`,
+      available: voices,
+      problem: { code: 'tts_no_voice', detail: '系统里没有可用的中文语音。' },
+    };
+  }
+
+  // 系统里没有该性别的语音。若这个性别是玩家为角色**显式指定的**，
+  // 跨性别替换同样算"换了音色"，必须报错；自动判定出来的性别则允许兜底。
+  if (setting.gender === 'male' || setting.gender === 'female') {
+    return {
+      gender,
+      voiceName: null,
+      reason,
+      available: voices,
+      problem: {
+        code: 'voice_unavailable',
+        detail: `你为该角色指定了${genderWord}声，但系统里没有${genderWord}声语音。程序不会改用其它性别的声音。`,
+      },
+    };
+  }
+
+  return {
+    gender,
+    voiceName: voices[0].name,
+    reason: `${reason}；系统里没有${genderWord}声，按第一个语音兜底`,
+    available: voices,
+    problem: null,
+  };
 }
 
 /** 该 NPC 是否参与自动朗读（逐 NPC 静音开关）。 */

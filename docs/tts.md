@@ -527,7 +527,7 @@ Node execFile('powershell.exe', ['-NoProfile','-NonInteractive','-ExecutionPolic
 
 - 枚举到 3 个中文语音：`Huihui`(女)、`Yaoyao`(女)、`Kangkang`(男)。
 - 合成：Kangkang 240,910 B / 462ms；Huihui 261,326 B / 387ms；同参数二次调用 `cached:true`。
-- 不存在的音色名自动回退系统默认，仍能出声。
+- 不存在的音色名：0.19.2 起**报错跳过**（`voice_unavailable`），不再回退系统默认（见 §19）。
 - 空文本前置拒绝（`empty_text`），不会生成 46 字节空 WAV。
 
 ### 13.2 端到端（假上游 + 真实后端，测试档）
@@ -764,9 +764,9 @@ tts-engines/                        # 正式档与测试档共用，切换档位
 synthesize({ text, voice, rate, pitch }) -> { ok, wav, synthMs, reason? }
 ```
 
-- `windows`：WinRT + PowerShell，**默认 + 兜底**
+- `windows`：WinRT + PowerShell，默认引擎
 - `kokoro`：子进程调 `sherpa-onnx-offline-tts.exe`，用 `--sid` 选说话人
-- 引擎目录缺失 / 调用失败 → **自动回退 `windows`**，只记一条日志，不打断朗读
+- 引擎目录缺失 / 调用失败 → **报错并跳过本条朗读**，*不*改用另一个引擎（见 §19）
 
 **逐 NPC 音色模型**（`voice.json` 扩展，向后兼容）：
 
@@ -861,12 +861,14 @@ Kokoro **比实时慢**（RTF≈1.3~1.7），因此：
 - 长句等待明显，短句体验尚可；
 - 已做单并发（1 个进程）避免互相拖慢，线程数默认 4（实测 8 无提升，16/32 更慢）。
 
-### 15.5 回退与安全
+### 15.5 失败处理与安全
 
-- Kokoro 未安装 → 直接走 `windows`，不报错
-- Kokoro 合成失败 / 超时（180 s）/ 模型缺失 → **自动回退 `windows`**，只记一条 `tts` 日志，玩家仍有声音
+- Kokoro 未安装：若配置的引擎是 `kokoro`，朗读返回 `engine_unavailable` 并跳过，**不**改走 `windows`
+- Kokoro 合成失败 / 超时（180 s）/ 模型缺失 → 记一条 `tts` 错误日志，本条无声，**不**换音色
+- 系统语音名失效（被卸载 / 换语言包）→ `voice_unavailable`，**不**挑同性别或第一个语音顶上
 - 配置接口拒绝切到未安装的引擎（400 `engine_not_installed`）、拒绝未知音色（400）
 - 关服时两个引擎的在飞子进程都会被 `kill`（`ttsShutdown()`），不拖住进程退出
+- 上述三条「不换音色」的红线见 §19
 
 ### 15.6 验收记录（2026-11-12）
 
@@ -932,7 +934,7 @@ SteamLibrary\steamapps\workshop\content\4209920\<物品ID>\
 | 情形 | 行为 |
 | --- | --- |
 | 10 个文件齐备 | `kokoroInstalled=true`，**不发起任何下载**；`POST /api/tts/install` 直接返回 `alreadyInstalled` |
-| 缺任一文件（含 0 字节） | 判定未安装，管理页显示「未安装 + 下载按钮」，运行时自动回退系统语音 |
+| 缺任一文件（含 0 字节） | 判定未安装，管理页显示「未安装 + 下载按钮」；若配置仍是 kokoro，朗读会返回 `engine_unavailable` 并跳过（**不**改用系统语音，见 §19） |
 | 引擎在但配置仍是 windows | 保持 windows（装完不自动切换，见 §15.4） |
 
 启动横幅会打印一行：
@@ -1039,7 +1041,7 @@ tts-engines/kokoro/model.int8.onnx         114,202,993 B (108.91 MiB)  ← .giti
 - 两套音色配置**互不覆盖**：Windows 存 `tts.voices.male/female`，
   Kokoro 存 `tts.kokoro.voiceMale/voiceFemale`；切换引擎后切回来仍是原来的选择。
 - 引擎下拉文案随安装状态变化（未安装时显示「需下载约 162 MB」）；
-  未安装时选 kokoro 会被拦下并回退到 windows。
+  未安装时选 kokoro 会被拦下（提示先下载，下拉回到原选择），不会静默切到 windows。
 - 删掉旧的 `#ttsKokoroFemale` / `#ttsKokoroMale` 与 `renderKokoroVoices()`、
   `renderVoiceOptions()`，统一为 `renderVoiceSelects()`（按 `currentEngine()` 填两组下拉）。
 - 引擎值以 `/api/tts/voices` 的 `engines.configured` 为准回填，
@@ -1081,3 +1083,54 @@ tts-engines/kokoro/model.int8.onnx         114,202,993 B (108.91 MiB)  ← .giti
 
 浏览器实测：重载后引擎显示 `kokoro`、女声 `zf_xiaoyi`、男声 `zm_yunxi` 与配置一致；
 直接进 NPC 页也能看到「Kokoro 专属音色」下拉；控制台无报错；全站无重复 id。
+
+---
+
+## 19. 红线：选定的音色不得被替换
+
+**规则**：用户显式选过音色（引擎或音色名）之后，程序在任何情况下都只用那一个。
+拿不到就**报错跳过本条朗读**，绝不换成别的音色或另一个引擎。
+只有「用户从没选过」（`gender: auto` 且音色留空）时才按性别自动挑。
+
+理由：中途换成另一个人的声音，比这条没有声音更糟——玩家会以为角色换人了，
+或者以为功能坏了。音色是玩家对角色的一部分预期。
+
+### 19.1 修掉的 5 处静默替换（0.19.2）
+
+| # | 位置 | 原来的行为 | 现在 |
+| --- | --- | --- | --- |
+| 1 | `src/tts/index.js` | 配置 kokoro 但引擎缺失 → 改用 `windows` | `engine_unavailable`，本条无声 |
+| 2 | `src/tts/index.js` | Kokoro 合成失败 → 改用 `windows` | `kokoro_failed`，本条无声 |
+| 3 | `src/tts/voice.js` `resolveVoice()` | 配置的 Windows 音色名不存在 → 取同性别，再不行取 `voices[0]`（可能跨性别） | `voice_unavailable`，本条无声 |
+| 4 | `src/tts/index.js` `kokoroVoiceFor()` | Kokoro 音色名无效 → 取全局默认，再不行硬编码 `zf_xiaoxiao`/`zm_yunxi` | `voice_unavailable`，本条无声 |
+| 5 | `public/app.js` `renderVoiceSelects()` | 配置的音色不在列表里 → 下拉显示成 `list[0]`，一保存就真的改掉了 | 保留原值并标注「已失效，请重选」 |
+
+### 19.2 行为约定
+
+| 情形 | HTTP | UI |
+| --- | --- | --- |
+| 音色名失效（系统语音被卸载 / 换语言包） | 409 `voice_unavailable` | 下拉显示「<名字>（已失效，请重选）」；保存时拦下并提示先重选 |
+| Kokoro 引擎缺失 | 409 `engine_unavailable` | 状态栏「未安装」＋提示「朗读会报错，不会改用系统语音」 |
+| Kokoro 合成失败 / 超时 | 500 `kokoro_failed` | 执行日志记一条 error，本条无声 |
+| 自动朗读遇到上述情况 | 同上（`?auto=1`） | 不弹窗、不打断队列，只在状态行说明 |
+| 试听时显式指定的音色失效 | 409 | 试听失败并说明原因 |
+| 用户从没选过音色 | 200 | 按性别自动挑，属于正常默认行为 |
+
+`/api/status` 的 `tts.activeEngine` 现在等于**配置里的引擎**（不再偷偷降级），
+是否真的能用看新增的 `tts.engineReady`。`/api/tts/voices` 新增
+`engines.voicesAvailable.{male,female}`，前端据此标注失效项。
+
+### 19.3 验证（0.19.2）
+
+严格性回归 **24 项全通过**（独立临时档位，`tts-engines` 故意不存在）：
+
+- `engine-missing-409` / `engine-missing-reason` / `engine-missing-no-audio`
+- `status-active-is-kokoro` / `status-engine-not-ready`（不再假装降级）
+- `preview-engine-missing-400`
+- `npc-detail-problem` / `npc-detail-keeps-configured-voice`（仍是配置那个名字，不是别的）
+- `missing-windows-voice-409` / `missing-windows-voice-msg`（消息里带出失效的具体名字）
+- `preview-missing-voice-409`
+- `voices-available-female-false`
+
+正常路径回归 **14 项全通过**（Kokoro 已安装、音色都有效）：windows/kokoro 音频都 200 且
+字节不同、试听正常、NPC 详情无 problem、静音 204 / 过期 404 语义不变。

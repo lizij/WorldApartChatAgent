@@ -654,3 +654,39 @@
   · **exe 冒烟**：`version=0.19.1`、`kokoroInstalled=True`、`/api/tts/voices` 带
     `voiceFemale/voiceMale`；Kokoro 试听 200 / 58 KB、Windows 试听 200 / 56 KB；
     页面含 `tts-sub` 音色小节、前端含 `renderVoiceSelects`；关窗后进程全退、端口释放。
+
+
+- **红线「选定的音色不得被替换」（2026-11-13，0.19.2）**：
+  · **背景**：玩家明确要求「任何情况下用户选择了音色都不能自动切到其他的」。
+    复查发现现有实现有 5 处会静默换音色：
+    1. `src/tts/index.js`——配置 kokoro 但引擎缺失 → 改用 `windows`；
+    2. `src/tts/index.js`——Kokoro 合成失败（超时/模型损坏/进程崩溃）→ 回退 `windows`；
+    3. `src/tts/voice.js` `resolveVoice()`——配置的系统语音名不在列表里 → 取同性别，
+       再不行取 `voices[0]`（男声缺失时会挑到女声，**性别都会变**）；
+    4. `src/tts/index.js` `kokoroVoiceFor()`——Kokoro 音色名无效 → 取全局默认，
+       再不行硬编码 `zf_xiaoxiao`/`zm_yunxi`；
+    5. `public/app.js` `renderVoiceSelects()`——配置的音色不在列表里 → 下拉显示成
+       `list[0]`，用户一点保存就真的把音色改掉了。
+  · **改法**：用户显式选过音色（引擎或音色名）之后只认那一个，取不到就报错跳过本条朗读；
+    只有「用户从没选过」（`gender: auto` 且音色留空）时才按性别自动挑。
+    · `resolveVoice()` 新增 `problem: {code, detail}`；`kokoroVoiceFor()` 改为返回
+      `{voice, problem}`；
+    · `speak()` 去掉 `engineFallback`：`engine_unavailable` / `voice_unavailable` /
+      `kokoro_failed` 一律直接返回错误，不再落到 Windows 分支；
+    · `/api/tts/audio` 对上述三种返回 **409** 并带上具体失效的音色名；
+      `/api/tts/preview` 对显式指定但不可用的音色同样 409（不再默认 `KOKORO_VOICES[0]`）；
+    · `/api/status` 的 `tts.activeEngine` 改为等于**配置里的引擎**（不再偷偷降级），
+      新增 `tts.engineReady`；`/api/tts/voices` 新增 `engines.voicesAvailable.{male,female}`；
+    · NPC 详情返回 `engineReady` 与 `voiceResolved.problem`，前端在该 NPC 卡片里显示警告；
+    · 前端下拉对失效值显示「<名字>（已失效，请重选）」，且保存时拦下要求先重选；
+      引擎缺失时状态行明确写「朗读会报错，不会改用系统语音」。
+  · **严格性回归 24 项全通过**（独立临时档位，`tts-engines` 故意不存在）：
+    `engine-missing-409` / `engine-missing-reason` / `engine-missing-no-audio` /
+    `status-active-is-kokoro` / `status-engine-not-ready` / `preview-engine-missing-400` /
+    `npc-detail-problem` / `npc-detail-keeps-configured-voice` /
+    `missing-windows-voice-409` / `missing-windows-voice-msg`（消息带出失效的具体名字）/
+    `preview-missing-voice-409` / `voices-available-female-false`。
+  · **正常路径回归 14 项全通过**（Kokoro 已装、音色都有效）：windows / kokoro 音频均 200
+    且字节不同、试听 200、NPC 详情无 problem、静音 204 / 过期 404 语义不变。
+  · 文档：`docs/tts.md` 新增 §19（红线、5 处修复、行为表、验证），并修正 §15.5 / §16 里
+    「自动回退」的旧描述；`docs/configuration.md` 与 `AGENTS.md` 同步。

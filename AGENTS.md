@@ -208,7 +208,7 @@ WorldApartProject/
 │  │  ├─ kokoro.js            # Kokoro：sherpa-onnx 子进程合成（单并发 / 180s 超时 / LRU）
 │  │  ├─ install.js           # Kokoro 下载器（hf-mirror + GitHub 镜像 / 断点续传 / SHA-256）
 │  │  ├─ util.js              # 共用：临时目录、WAV 校验、数值归一化
-│  │  └─ index.js             # 门面：选引擎 → 清洗 → 选音色 → 合成；失败自动回退 Windows
+│  │  └─ index.js             # 门面：选引擎 → 清洗 → 选音色 → 合成；失败只报错，不换音色
 │  └─ memory/
 │     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照、逐 NPC 提示词
 │     ├─ inject.js            # 长期记忆 / 外置设定提示词注入文本组装
@@ -223,7 +223,8 @@ WorldApartProject/
 由正式档与测试档共用，避免切档重复下载（见 [docs/tts.md](docs/tts.md) §14.5）。
 
 > **启动即检测**：程序启动时检查 `tts-engines/kokoro/` 是否齐备（10 个文件），
-> 齐备则 `kokoroInstalled=true`、无需任何下载；缺任一文件视为未安装并自动回退系统语音。
+> 齐备则 `kokoroInstalled=true`、无需任何下载；缺任一文件视为未安装，此时若配置仍是 kokoro，
+> 朗读会报错跳过而**不**改用系统语音（选定的音色不得被替换，见 [docs/tts.md](docs/tts.md) §19）。
 > 启动横幅与管理页都会显示引擎状态。
 >
 > **预置分发**：源码根的 `tts-engines/`（**已入库**，约 159 MB）+ `npm run dist:win` 会自动同步到
@@ -313,13 +314,17 @@ data/  或  data_test/
   [docs/tts.md](docs/tts.md) 与 [docs/verification-log.md](docs/verification-log.md)）。
 - 0.19.0：新增可选 **Kokoro 离线神经语音引擎**（sherpa-onnx + Kokoro-82M int8，Apache-2.0）。
   可选 **晓晓 / 小艺（女）+ 云希（男）**，实测 159.2 MB、安装 106 秒、国内 hf-mirror 可下。
-  装到 exe 同层 `tts-engines/`（两档共用），管理页点一下下载并显示进度；未安装或合成失败
-  **自动回退系统语音**，默认引擎仍是 Windows。代价：合成比播放慢（24 字约 6.7 秒）。
-  端到端 22 项回归通过。
+  装到 exe 同层 `tts-engines/`（两档共用），管理页点一下下载并显示进度；默认引擎仍是 Windows。
+  代价：合成比播放慢（24 字约 6.7 秒）。端到端 22 项回归通过。
 - 0.19.1：**引擎归入「音色」**——不再单独成卡片，并入「语音朗读」卡片的【音色】小节；
   男/女声下拉随引擎换表，Windows 与 Kokoro 两套音色配置各自独立保存、切换互不覆盖。
   同时修掉 4 个缺陷：`/api/status` 缺 Kokoro 音色导致重载后回退、首屏并发把引擎重置为 windows、
   切页重复枚举系统语音、未开实验页就进 NPC 页时缺 Kokoro 音色下拉。回归 34 项通过。
+- 0.19.2：**红线「选定的音色不得被替换」**——修掉 5 处静默换音色（引擎缺失改走 Windows、
+  Kokoro 失败回退、系统语音名失效顶替、Kokoro 音色名失效顶替、下拉框显示成第一个）。
+  现在音色或引擎取不到就报错跳过本条朗读（409 `voice_unavailable` / `engine_unavailable`），
+  只在用户从没选过音色时才按性别自动挑。严格性 24 项 + 正常路径 14 项回归通过
+  （见 [docs/tts.md](docs/tts.md) §19）。
 
 > 逐条验证证据、修过的缺陷与排障手册见 [docs/verification-log.md](docs/verification-log.md)。
 

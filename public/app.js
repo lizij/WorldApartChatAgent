@@ -181,15 +181,15 @@ async function loadConfig() {
   $('#ttsDefaultGender').value = tts.defaultGender === 'male' ? 'male' : 'female';
   updateTtsSkipVisibility();
   initTtsPlayer(tts);
-  // 引擎相关：只回填配置值，**不要**在这里枚举系统语音
-  // （枚举要起一次 PowerShell 约 0.4s，放到切到「实验功能」页时再做）
-  //
-  // 注意竞态：首屏 loadStatus / loadConfig / loadTtsEngines 是并发的，
-  // 这里若因为"还不知道是否已安装"就强制回退 windows，会盖掉 loadTtsEngines 已设好的值。
-  // 因此只有**确认未安装**时才降级，未知时按配置显示（后端本来也会自动回退）。
-  const knowInstalled = ttsVoicesLoaded || !!statusCache;
-  const installedNow = ttsVoicesLoaded ? ttsKokoro.installed : !!statusCache?.tts?.kokoroInstalled;
-  $('#ttsEngine').value = tts.engine === 'kokoro' && (installedNow || !knowInstalled) ? 'kokoro' : 'windows';
+  // 配置里保存的 Windows 音色名（判断「已失效」要用）
+  ttsConfigVoices = {
+    male: String(tts.voices?.male || ''),
+    female: String(tts.voices?.female || ''),
+  };
+  // 引擎只回填配置值，**不降级**：Kokoro 缺失时由状态栏与提示显式说明，
+  // 而不是把下拉换成 windows（那等于替用户换掉音色，见 docs/tts.md §19）。
+  // 也不要在这里枚举系统语音（约 0.4s，放到切到「实验功能」页时再做）。
+  $('#ttsEngine').value = tts.engine === 'kokoro' ? 'kokoro' : 'windows';
   syncEngineOptions();
   // 只在音色清单已加载时才重填下拉：否则会把两个下拉清成「未检测到语音」并禁用，
   // 而那时用户还没打开过「实验功能」页（清单是按需枚举的）。
@@ -534,6 +534,14 @@ $('#saveTts')?.addEventListener('click', async () => {
   // 只有真正选到音色名时才写入，避免"未检测到语音"时把配置清空。
   const male = $('#ttsVoiceMale')?.value || '';
   const female = $('#ttsVoiceFemale')?.value || '';
+  // 下拉里显示「已失效」的那个值不能直接存下去——先让用户重选，
+  // 否则保存后仍然是坏配置（而且用户会以为已经改好了）。
+  const validList = engine === 'kokoro' ? ttsKokoro.voices : ttsSystemVoices;
+  const bad = [male, female].filter((n) => n && !validList.some((v) => v.name === n));
+  if (bad.length) {
+    setTtsStatus(`音色「${bad.join('」「')}」已失效，请重新选择后再保存`, true);
+    return;
+  }
   if (engine === 'kokoro') {
     ttsPatch.kokoro = {};
     if (male) ttsPatch.kokoro.voiceMale = male;
@@ -616,18 +624,20 @@ $('#ttsStop')?.addEventListener('click', () => {
 let ttsVoicesLoaded = false;
 /** 系统语音清单与建议（由 /api/tts/voices 提供，切换引擎时复用，避免重复枚举）。 */
 let ttsSystemVoices = [];
-let ttsSystemSuggested = { male: null, female: null };
 /** Kokoro 引擎状态与音色清单。 */
 let ttsKokoro = { installed: false, voices: [], downloadBytes: 0, bytes: 0, voiceMale: '', voiceFemale: '' };
+/** 配置里保存的 Windows 音色名（用于判断"已失效"）。 */
+let ttsConfigVoices = { male: '', female: '' };
 let ttsInstallTimer = null;
 
 /**
- * 界面当前真正生效的引擎。
- * 配置里可能是 kokoro 但引擎未安装，此时一律按 windows 处理（与后端回退逻辑一致）。
+ * 界面当前真正生效的引擎 = 用户选的那个。
+ *
+ * 这里**不做**任何降级：引擎缺失时后端会明确报错，前端也据实显示，
+ * 而不是偷偷把下拉换成 windows（那等于替用户换掉音色，见 docs/tts.md §19）。
  */
 function currentEngine() {
-  const want = $('#ttsEngine')?.value === 'kokoro' ? 'kokoro' : 'windows';
-  return want === 'kokoro' && ttsKokoro.installed ? 'kokoro' : 'windows';
+  return $('#ttsEngine')?.value === 'kokoro' ? 'kokoro' : 'windows';
 }
 
 /**
@@ -649,48 +659,47 @@ function renderVoiceSelects() {
     sel.innerHTML = '';
     sel.disabled = false;
 
-    if (engine === 'kokoro') {
-      const list = ttsKokoro.voices.filter((v) => v.gender === gender);
-      if (!list.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '（这台机器没有该性别的 Kokoro 音色）';
-        sel.appendChild(o);
-        sel.disabled = true;
-        continue;
-      }
-      for (const v of list) {
-        const o = document.createElement('option');
-        o.value = v.name;
-        o.textContent = v.label;
-        sel.appendChild(o);
-      }
-      const want = gender === 'male' ? ttsKokoro.voiceMale : ttsKokoro.voiceFemale;
-      sel.value =
-        (prev && list.some((v) => v.name === prev) ? prev : null) ||
-        (want && list.some((v) => v.name === want) ? want : null) ||
-        list[0].name;
+    const isKokoro = engine === 'kokoro';
+    const list = isKokoro ? ttsKokoro.voices.filter((v) => v.gender === gender) : ttsSystemVoices;
+    // 配置里保存的音色名（用户的选择）。失效时**保留它并标注**，绝不换成列表第一个。
+    const configured = isKokoro
+      ? (gender === 'male' ? ttsKokoro.voiceMale : ttsKokoro.voiceFemale)
+      : (gender === 'male' ? ttsConfigVoices.male : ttsConfigVoices.female);
+
+    if (!list.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = isKokoro ? '（这台机器没有该性别的 Kokoro 音色）' : '未检测到系统语音';
+      sel.appendChild(o);
+      sel.disabled = true;
+      continue;
+    }
+
+    for (const v of list) {
+      const o = document.createElement('option');
+      o.value = v.name;
+      o.textContent = isKokoro
+        ? v.label
+        : `${v.name}（${v.gender === 'male' ? '男' : '女'} · ${v.language}）`;
+      sel.appendChild(o);
+    }
+
+    const has = (n) => !!n && list.some((v) => v.name === n);
+    const wanted = prev || configured;
+    if (has(wanted)) {
+      sel.value = wanted;
+    } else if (wanted) {
+      // 用户选过、但现在取不到 → 显式标注为「已失效」，让用户看见异常并主动重选
+      const o = document.createElement('option');
+      o.value = wanted;
+      o.textContent = `${wanted}（已失效，请重选）`;
+      sel.insertBefore(o, sel.firstChild);
+      sel.value = wanted;
     } else {
-      const list = ttsSystemVoices;
-      if (!list.length) {
-        const o = document.createElement('option');
-        o.value = '';
-        o.textContent = '未检测到系统语音';
-        sel.appendChild(o);
-        sel.disabled = true;
-        continue;
-      }
-      for (const v of list) {
-        const o = document.createElement('option');
-        o.value = v.name;
-        o.textContent = `${v.name}（${v.gender === 'male' ? '男' : '女'} · ${v.language}）`;
-        sel.appendChild(o);
-      }
-      const want = gender === 'male' ? ttsSystemSuggested.male : ttsSystemSuggested.female;
-      sel.value =
-        (prev && list.some((v) => v.name === prev) ? prev : null) ||
-        (want && list.some((v) => v.name === want) ? want : null) ||
-        (list.find((v) => v.gender === gender) || list[0]).name;
+      // 用户从没选过：按性别自动挑（不属于"替换用户的选择"）
+      sel.value = isKokoro
+        ? list[0].name
+        : (list.find((v) => v.gender === gender) || list[0]).name;
     }
   }
 }
@@ -720,7 +729,6 @@ async function loadTtsEngines(force = false) {
 
     // 系统语音
     ttsSystemVoices = d.voices || [];
-    ttsSystemSuggested = { male: d.suggested?.male || null, female: d.suggested?.female || null };
 
     // Kokoro（音色以接口返回的当前配置为准，不依赖 /api/status）
     const k = d.engines?.kokoro || {};
@@ -792,7 +800,15 @@ function renderKokoroState(state) {
     statusEl.value = state?.error ? '安装失败' : '未安装';
     if (installRow) installRow.hidden = false;
     if (progEl) progEl.hidden = true;
-    if (hintEl) hintEl.textContent = state?.error ? '上次安装失败：' + state.error : '';
+    // 选着 kokoro 但引擎不在 → 明确说清朗读会报错，不会改用系统语音
+    const usingKokoro = $('#ttsEngine')?.value === 'kokoro';
+    if (hintEl) {
+      hintEl.textContent = state?.error
+        ? '上次安装失败：' + state.error
+        : usingKokoro
+          ? '当前选的是 Kokoro，但引擎缺失：朗读会报错而**不会**改用系统语音。请重新安装，或把音色引擎改回 Windows。'
+          : '';
+    }
     // 失败后清掉进度条残留，避免下次显示上一次的百分比
     if (progEl && state?.error) {
       const fill = $('#ttsBarFill');
@@ -1055,8 +1071,10 @@ const ERROR_TEXT_LABELS = {
   not_plain_text: '回复里没有可朗读的纯文本',
   empty_text: '这条回复里没有可朗读的文字',
   // Kokoro 引擎
-  kokoro_failed: 'Kokoro 合成失败（已自动回退系统语音）',
-  kokoro_not_installed: 'Kokoro 引擎尚未安装，已回退系统语音',
+  kokoro_failed: 'Kokoro 合成失败（不会改用其它音色）',
+  kokoro_not_installed: 'Kokoro 引擎尚未安装（不会改用系统语音）',
+  engine_unavailable: '你选择的引擎不可用，朗读已跳过（不会改用其它音色）',
+  voice_unavailable: '所选音色不可用，朗读已跳过（不会改用其它音色）',
   engine_not_installed: '这个语音引擎还没安装，请先在「实验功能」里下载',
   checksum_mismatch: '下载的文件校验不通过（已删除，可重试）',
   incomplete_after_install: '安装不完整，请重试',
@@ -1564,7 +1582,6 @@ function renderLog(rec) {
     body = `<div class="log-line warn">${esc(rec.slug || '')} ${what}失败</div>
       <div class="log-meta">
         ${engineTag ? `<span>${esc(engineTag)}</span>` : ''}
-        ${rec.engineFallback ? `<span class="warn">已回退到系统语音（${esc(rec.engineFallback)}）</span>` : ''}
         ${rec.voice ? `<span>${esc(rec.voice)}</span>` : ''}
         ${rec.chars != null ? `<span>${rec.chars} 字</span>` : ''}
         ${
@@ -1792,8 +1809,13 @@ async function loadNpcDetail(slug, name) {
     <div class="act-row"><button class="btn primary sm" id="saveAliases">保存别名</button><span class="saved-hint" id="aliasSaved"></span></div>
     <h4>语音朗读（本 NPC）</h4>
     <p class="hint">当前引擎：<strong>${esc(d.engine === 'kokoro' ? 'Kokoro 神经语音' : 'Windows 内置语音')}</strong>
-      · 当前音色：<strong>${esc(d.voiceResolved?.voiceLabel || d.voiceResolved?.voiceName || '未检测到系统语音')}</strong>
+      · 当前音色：<strong>${esc(d.voiceResolved?.voiceLabel || d.voiceResolved?.voiceName || '不可用')}</strong>
       （${d.voiceResolved?.gender === 'male' ? '男声' : '女声'}）· 判定依据：${esc(d.voiceResolved?.reason || '')}</p>
+    ${
+      d.voiceResolved?.problem
+        ? `<p class="hint warn">${esc(d.voiceResolved.problem.detail || '所选音色不可用')}</p>`
+        : ''
+    }
     <label class="check small"><input type="checkbox" id="npcVoiceEnabled" ${d.voice?.enabled !== false ? 'checked' : ''} /> 参与自动朗读（取消勾选即静音；手动点 ▶ 仍可播）</label>
     <div class="grid three advanced">
       <label>音色<select id="npcVoiceGender">

@@ -29,12 +29,12 @@
 | `multiNpc.transcriptTurns/skipOnTask/autoExitIdleMs` | 共享对话条数（8）/ **真任务轮**退化单人戏（`## 任务：X` 的标题既不是“闲聊”也不是“话题闲聊”时才算；`本次话题`/`收尾判定` 属于话题闲聊，不退化）/ 超时清场（默认 **120 分钟**，管理页按分钟填写） |
 | `multiNpc.actorTailWaitMs/actorMaxTokens/actorTimeoutMs` | 主角先说完时等待配角的上限（3s）/ 配角输出上限（300 tokens）/ 配角调用超时（20s） |
 | `tts.enabled` | **实验性**语音朗读总开关（默认 `false`）。开启后管理页对每条新到的 NPC 回复自动调用系统语音朗读。**关闭时不合成、不启动任何子进程**；历史回复不补播（日志里点 ▶ 可手动朗读）。声音由管理页播放，关窗即停 |
-| `tts.engine` | 音色引擎：`windows`（默认，系统自带语音，零下载、首音约 0.5s）/ `kokoro`（离线神经语音，需下载约 159MB，接近真人但**合成比播放慢**）。**它只决定"有哪些声音可选"**，因此在界面上位于「语音朗读 → 音色」小节内。`kokoro` 未安装或调用失败时**自动回退 `windows`**；切换到未安装的 `kokoro` 会被配置接口拒绝（400 `engine_not_installed`） |
+| `tts.engine` | 音色引擎：`windows`（默认，系统自带语音，零下载、首音约 0.5s）/ `kokoro`（离线神经语音，需下载约 159MB，接近真人但**合成比播放慢**）。**它只决定"有哪些声音可选"**，因此在界面上位于「语音朗读 → 音色」小节内。`kokoro` 未安装或合成失败时**报错跳过本条朗读，绝不换成 `windows`**（见 [tts.md](tts.md) §19）；切换到未安装的 `kokoro` 会被配置接口拒绝（400 `engine_not_installed`） |
 | `tts.kokoro.voiceFemale` / `tts.kokoro.voiceMale` | Kokoro 女/男音色，只接受 `zf_xiaoxiao`（晓晓）/ `zf_xiaoyi`（小艺）/ `zm_yunxi`（云希），其它值返 400。逐 NPC 可在「NPC 记忆」页覆盖。与 `tts.voices.*`（Windows 音色）**各自独立**，切换引擎不会互相覆盖 |
 | `tts.kokoro.threads` | Kokoro 合成线程数（默认 4，范围 1~8）。实测 4 最优：8 无提升，16/32 反而更慢 |
 | `tts.readMode` | `all` 全部内容（含旁白）/ `dialogue` 只读引号内的对白；`dialogue` 抽不到引号时自动回退 `all` 并在界面提示 |
 | `tts.skipActions` | `all` 模式下是否跳过 `（…）`/`(…)` 动作描写（默认 `true`）。2026-11 游戏契约已改为 `content` 只写台词，该开关主要服务于旧日志与自建提示词场景 |
-| `tts.voices.male` / `tts.voices.female` | 全局男 / 女音色名（默认 `Microsoft Kangkang` / `Microsoft Huihui`）。取不到时回退到系统第一个同性别中文语音 |
+| `tts.voices.male` / `tts.voices.female` | 全局男 / 女音色名（默认 `Microsoft Kangkang` / `Microsoft Huihui`）。**配了就必须用它**：取不到（语音被卸载或换了语言包）时报错跳过本条朗读，不会挑同性别或第一个系统语音顶上（见 [tts.md](tts.md) §19） |
 | `tts.defaultGender` | 性别判定失败时用哪个音色（`female`/`male`，默认 `female`） |
 | `tts.rate` / `tts.pitch` | 合成语速（0.5~3）/ 音调（0.5~2），默认 1.0；逐 NPC 可覆盖 |
 | `tts.volume` | **播放音量**（0~1，默认 0.8）：只在页面 `<audio>.volume` 生效，不参与合成、不进缓存 |
