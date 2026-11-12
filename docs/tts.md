@@ -273,15 +273,23 @@ data*/tmp/tts/                 # 合成临时目录（job.json / *.wav），启�
 
 ### 4.1 实验功能页：「语音朗读」卡片
 
-放在「请求重写」卡片之后：
+放在「请求重写」卡片之后。**引擎是音色的一部分，不再单独成卡片**：
+卡片内顺序为 自动朗读 → 朗读范围 → **【音色】小节（引擎 + 男女声）** → 语速/音调/字数 → 音量/默认音色 → 保存。
 
 - **自动播放开关**：变更即保存（单独 `PUT {tts:{enabled}}`），并同步水位（见 §4.3）。
 - 朗读范围 `全部内容 / 仅对白`；选「全部内容」时显示「跳过括号内的动作描写」。
-- 男声 / 女声下拉（只列系统中文语音；缺失项显示「未安装」并给出
-  `设置 → 时间和语言 → 语音` 的路径提示）。语音清单**在切到本页时才拉**
-  `/api/tts/voices`（枚举要起一次 PowerShell，约 0.4s），不要放进首屏 `loadStatus()`。
-- **男声试听 / 女声试听**（`POST /api/tts/preview`）。
-- 语速 / 音调 / 播放音量滑块，单条字数上限。
+- **【音色】小节**（`h4.tts-sub`）：
+  - **音色引擎** `Windows 内置语音（即时）` / `Kokoro 神经语音（接近真人）`。
+    换引擎后**男声/女声两个下拉立刻换成对应的可选声音**（系统中文语音 ↔ Kokoro 说话人），
+    这是「引擎只决定有哪些声音可选」的直接体现。
+  - 男声 / 女声下拉：内容随引擎变化；Kokoro 未安装时 `kokoro` 选项不可选（选了会回退并提示下载）。
+  - Kokoro 状态 + 未安装时的「下载并安装」按钮与进度条（已安装后自动隐藏，只留一行就绪提示）。
+  - **男声试听 / 女声试听**（`POST /api/tts/preview`，同时带 `engine` 与 `voice`）。
+  - 两套音色配置**各自独立保存**：Windows 存 `tts.voices.male/female`，
+    Kokoro 存 `tts.kokoro.voiceMale/voiceFemale`；切换引擎不会互相覆盖，切回来还是原来的选择。
+  - 语音清单**在切到本页时才拉** `/api/tts/voices`（枚举系统语音要起一次 PowerShell，约 0.4s），
+    不要放进首屏 `loadStatus()`。
+- 语速 / 音调 / 播放音量，单条字数上限。
 - 播放器：当前条目名、▶/⏸、⏹ 停止、队列长度、错误提示区。
 - 「保存语音设置」按钮（除自动播放开关外的字段）。
 - `public/index.html` 的 `</main>` 前加一个全局播放元素 `<audio id="ttsAudio" hidden></audio>`
@@ -1013,3 +1021,63 @@ tts-engines/kokoro/model.int8.onnx         114,202,993 B (108.91 MiB)  ← .giti
 | 完整模型是否入库 | 否（`git check-ignore` 命中 `.gitignore:6`） |
 | 文本文件字节一致性 | `lexicon-zh` / `lexicon-us-en` / `tokens` 的 `git hash-object` 与索引 blob 完全一致 |
 | 删掉完整模型后启动 | 自动拼回并打印 `已由分片拼回模型（108.9 MB）` |
+
+---
+
+## 18. 界面迭代记录
+
+### 18.1 界面归位：引擎并入「音色」（0.19.0 修订）
+
+**反馈**：引擎本来就属于语音朗读的一部分，它影响的是音色，不该单独占一张卡片。
+
+**改法**：
+
+- 删掉独立的「语音引擎」卡片；在「语音朗读」卡片内新增 **【音色】小节**，
+  顺序为：音色引擎 → Kokoro 状态/下载 → 男声音色 → 女声音色 → 试听。
+- **男/女声下拉随引擎切换**：`windows` 列系统中文语音，`kokoro` 列 Kokoro 说话人
+  （晓晓 / 小艺 / 云希）。这正是「引擎只决定有哪些声音可选」的直观表达。
+- 两套音色配置**互不覆盖**：Windows 存 `tts.voices.male/female`，
+  Kokoro 存 `tts.kokoro.voiceMale/voiceFemale`；切换引擎后切回来仍是原来的选择。
+- 引擎下拉文案随安装状态变化（未安装时显示「需下载约 162 MB」）；
+  未安装时选 kokoro 会被拦下并回退到 windows。
+- 删掉旧的 `#ttsKokoroFemale` / `#ttsKokoroMale` 与 `renderKokoroVoices()`、
+  `renderVoiceOptions()`，统一为 `renderVoiceSelects()`（按 `currentEngine()` 填两组下拉）。
+- 引擎值以 `/api/tts/voices` 的 `engines.configured` 为准回填，
+  避免「配置是 kokoro 但引擎没装」时下拉与实际不符。
+
+**实测**：
+
+| 项 | 结果 |
+| --- | --- |
+| 实验功能页卡片数 | 3（多 NPC 共演 / 请求重写 / 语音朗读），引擎卡片已并入 |
+| 卡片内元素顺序 | 自动朗读 → 朗读范围 → 【音色】→ 引擎 → Kokoro 状态 → 男/女声 → 试听 → 语速/音调/字数 → 音量/默认音色 |
+| kokoro 下男/女声下拉 | `zm_yunxi` / `zf_xiaoxiao, zf_xiaoyi` |
+| windows 下男/女声下拉 | 3 个系统语音，默认选中 `Microsoft Kangkang` / `Microsoft Huihui` |
+| 切 windows → kokoro → windows | 每次下拉都正确换表并保留各自已选值；配置里两套并存 |
+| 试听（kokoro 小艺） | 200，播放完成后正常复位 |
+| NPC 记忆页 | Kokoro 专属音色下拉仍正常，显示「当前引擎：Kokoro 神经语音 · 当前音色：云希（男）」 |
+| 浏览器控制台 | 无报错 |
+
+**回归 35 项全通过**（模块级 9 + 端到端 26），含引擎切换后音频不同、
+两套音色配置互不覆盖、非法值拒绝、静音 204 / 手动 200、安装幂等、tts 日志不进界面。
+
+
+### 18.2 复查修复（0.19.1）
+
+界面归位后做了一轮全量复查，修掉 3 个真实缺陷：
+
+| # | 问题 | 现象 | 修复 |
+| --- | --- | --- | --- |
+| 1 | Kokoro 音色配置从前端拿不到 | `loadTtsEngines` 从 `/api/status` 读 `tts.kokoro.voiceMale/voiceFemale`，但该接口**没有这两项** → 每次重载页面 Kokoro 音色都回退成第一个（存的小艺显示成晓晓） | `/api/tts/voices` 的 `engines.kokoro` 增加 `voiceMale/voiceFemale/threads`，前端改从该接口读取 |
+| 2 | 首屏并发竞态 | `loadConfig()` 可能在 `loadStatus()` 之前完成，此时 `statusCache` 为空被判为"未安装"，把引擎下拉**强制重置为 windows**，覆盖掉 `loadTtsEngines` 已设好的 kokoro | 只有**确认未安装**时才降级；未知状态下忠实显示配置值（后端本就会自动回退） |
+| 3 | 切页重复枚举系统语音 | `ttsVoicesLoaded` 只写不读，每次切到「实验功能」都重新起 PowerShell 枚举（约 0.4s） | `loadTtsEngines` 增加 `if (ttsVoicesLoaded && !force) return`，命中时只重填下拉 |
+| 4 | NPC 页拿不到 Kokoro 音色清单 | 没先打开「实验功能」就直接进 NPC 页时，`ttsKokoro.voices` 为空 → 专属音色下拉不显示 | `loadNpcDetail` 在清单未加载时先 `await loadTtsEngines()`；切到 NPC tab 时也触发一次 |
+
+另外清理：`install.js` 未使用的 `MODEL_FILES` 导入。
+
+**复查后回归 34 项全通过**，新增覆盖：
+`voices-kokoro-voice-saved`（重载后音色不回退）、`save-windows-only`（保存一套不影响另一套）、
+`kokoro-kept` / `windows-voices-kept`（切引擎后两套配置各自保留）。
+
+浏览器实测：重载后引擎显示 `kokoro`、女声 `zf_xiaoyi`、男声 `zm_yunxi` 与配置一致；
+直接进 NPC 页也能看到「Kokoro 专属音色」下拉；控制台无报错；全站无重复 id。

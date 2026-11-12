@@ -157,47 +157,13 @@
     </div>
 
     <div class="card">
-      <h2>语音引擎 <span class="tag warn">实验性</span></h2>
-      <div class="kv">
-        <p class="hint">
-          <strong>Windows 内置语音</strong>：系统自带，零下载、出声最快（首音约 0.5 秒），但音色偏机械。<br />
-          <strong>Kokoro 神经语音</strong>：离线 AI 语音，接近真人（可选 2 女 1 男），
-          需下载 <strong id="ttsKokoroSize">约 162 MB</strong>（安装后占用约 159 MB），
-          <strong>合成比播放慢</strong>（6 秒台词约需 8 秒生成）。
-        </p>
-        <div class="grid two">
-          <label>当前引擎
-            <select id="ttsEngine">
-              <option value="windows">Windows 内置语音（即时）</option>
-              <option value="kokoro">Kokoro 神经语音（需下载）</option>
-            </select>
-          </label>
-          <label>Kokoro 状态<input id="ttsKokoroStatus" readonly /></label>
-        </div>
-        <div class="row" id="ttsInstallRow">
-          <button class="btn primary sm" id="ttsInstall">下载并安装 Kokoro（约 162 MB）</button>
-          <span class="saved-hint" id="ttsInstallMsg"></span>
-        </div>
-        <div id="ttsInstallProgress" hidden>
-          <div class="tts-bar"><div class="tts-bar-fill" id="ttsBarFill"></div></div>
-          <p class="hint" id="ttsInstallDetail"></p>
-        </div>
-        <div class="grid two" id="ttsKokoroVoices" hidden>
-          <label>默认女声<select id="ttsKokoroFemale"></select></label>
-          <label>默认男声<select id="ttsKokoroMale"></select></label>
-        </div>
-        <p class="hint" id="ttsEngineHint"></p>
-      </div>
-    </div>
-
-    <div class="card">
       <h2>语音朗读 <span class="tag warn">实验性</span></h2>
       <div class="kv">
         <label class="check"><input type="checkbox" id="ttsEnabled" /> 自动朗读新回复（默认关闭）</label>
         <p class="hint">
-          使用<strong>当前选择的引擎</strong>离线合成，免费、无需 Key、不联网；声音由本窗口播放，窗口最小化也能听到。
-          开启后，每条新到的 NPC 回复会自动朗读；关闭时<strong>完全不会合成</strong>，也不会启动任何系统进程。
-          历史回复不会补播——可在「执行日志」里点每条记录上的 ▶ 手动朗读。
+          离线合成，免费、无需 Key、不联网；声音由本窗口播放，窗口最小化也能听到。
+          开启后每条新到的 NPC 回复会自动朗读；关闭时<strong>完全不会合成</strong>，也不会启动任何系统进程。
+          历史回复不补播——可在「执行日志」里点每条记录上的 ▶ 手动朗读。
         </p>
         <p class="hint warn" id="ttsNotice" hidden></p>
         <div class="grid two">
@@ -209,10 +175,42 @@
           </label>
           <label class="check" id="ttsSkipWrap"><input type="checkbox" id="ttsSkipActions" /> 跳过括号内的动作描写（如「（她抿了口茶）」）</label>
         </div>
+
+        <h4 class="tts-sub">音色</h4>
+        <p class="hint">
+          引擎决定可选的声音：<strong>Windows 内置语音</strong>即时出声（首音约 0.5 秒）但偏机械；
+          <strong>Kokoro 神经语音</strong>接近真人，但合成比播放慢（6 秒台词约需 8 秒）。
+        </p>
         <div class="grid two">
-          <label>男声<select id="ttsVoiceMale"></select></label>
-          <label>女声<select id="ttsVoiceFemale"></select></label>
+          <label>音色引擎
+            <select id="ttsEngine">
+              <option value="windows">Windows 内置语音（即时）</option>
+              <option value="kokoro">Kokoro 神经语音（接近真人）</option>
+            </select>
+          </label>
+          <label>Kokoro 状态<input id="ttsKokoroStatus" readonly /></label>
         </div>
+        <div class="row" id="ttsInstallRow">
+          <button class="btn primary sm" id="ttsInstall">下载并安装 Kokoro（约 <span id="ttsKokoroSize">162</span> MB）</button>
+          <span class="saved-hint" id="ttsInstallMsg"></span>
+        </div>
+        <div id="ttsInstallProgress" hidden>
+          <div class="tts-bar"><div class="tts-bar-fill" id="ttsBarFill"></div></div>
+          <p class="hint" id="ttsInstallDetail"></p>
+        </div>
+        <div class="grid two">
+          <label>男声音色<select id="ttsVoiceMale"></select></label>
+          <label>女声音色<select id="ttsVoiceFemale"></select></label>
+        </div>
+        <div class="row">
+          <button class="btn sm" id="ttsPreviewMale">男声试听</button>
+          <button class="btn sm" id="ttsPreviewFemale">女声试听</button>
+          <button class="btn sm" id="ttsRefreshVoices">重新检测</button>
+          <button class="btn sm" id="ttsStop">停止朗读</button>
+          <span class="saved-hint" id="ttsStatus"></span>
+        </div>
+        <p class="hint" id="ttsEngineHint"></p>
+
         <div class="grid three advanced">
           <label>语速<input type="number" id="ttsRate" min="0.5" max="3" step="0.05" /></label>
           <label>音调<input type="number" id="ttsPitch" min="0.5" max="2" step="0.05" /></label>
@@ -224,13 +222,6 @@
             <option value="female">女声</option>
             <option value="male">男声</option>
           </select></label>
-        </div>
-        <div class="row">
-          <button class="btn sm" id="ttsPreviewMale">男声试听</button>
-          <button class="btn sm" id="ttsPreviewFemale">女声试听</button>
-          <button class="btn sm" id="ttsRefreshVoices">重新检测语音</button>
-          <button class="btn sm" id="ttsStop">停止朗读</button>
-          <span class="saved-hint" id="ttsStatus"></span>
         </div>
         <div class="row right"><button class="btn primary" id="saveTts">保存语音设置</button><span class="saved-hint" id="ttsSaved"></span></div>
       </div>

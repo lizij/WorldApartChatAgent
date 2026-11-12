@@ -24,7 +24,7 @@
 | 配置项（全部键、默认值与注意点） | [docs/configuration.md](docs/configuration.md) |
 | NPC 识别、注入优先级与记忆摘要规则 | [docs/memory-rules.md](docs/memory-rules.md) |
 | 管理接口与日志字段 | [docs/api.md](docs/api.md) |
-| 语音朗读（TTS）方案与设计（一期定稿，待实现） | [docs/tts.md](docs/tts.md) |
+| 语音朗读（TTS）方案、引擎选择与界面设计 | [docs/tts.md](docs/tts.md) |
 | 历史验证证据、缺陷复盘与排障 | [docs/verification-log.md](docs/verification-log.md) |
 | 目录结构、构建产物与文件职责 | 本文件 §3 |
 
@@ -316,6 +316,10 @@ data/  或  data_test/
   装到 exe 同层 `tts-engines/`（两档共用），管理页点一下下载并显示进度；未安装或合成失败
   **自动回退系统语音**，默认引擎仍是 Windows。代价：合成比播放慢（24 字约 6.7 秒）。
   端到端 22 项回归通过。
+- 0.19.1：**引擎归入「音色」**——不再单独成卡片，并入「语音朗读」卡片的【音色】小节；
+  男/女声下拉随引擎换表，Windows 与 Kokoro 两套音色配置各自独立保存、切换互不覆盖。
+  同时修掉 4 个缺陷：`/api/status` 缺 Kokoro 音色导致重载后回退、首屏并发把引擎重置为 windows、
+  切页重复枚举系统语音、未开实验页就进 NPC 页时缺 Kokoro 音色下拉。回归 34 项通过。
 
 > 逐条验证证据、修过的缺陷与排障手册见 [docs/verification-log.md](docs/verification-log.md)。
 

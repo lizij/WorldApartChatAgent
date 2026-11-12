@@ -627,3 +627,30 @@
     未触发 100 MB 默认限制；`GetPublishedFileDetails` 返回 `result=1`、`visibility=0`(public)、
     `time_updated` 为本次上传时间。→ 之前担心的「100 MB 上限」在本游戏不成立。
   · 更新说明改用 `workshop/changenote.txt` 重写为 0.19.0 内容（原来还停留在 0.17.2 的旧文案）。
+
+- **引擎归入「音色」+ 复查修缺陷（2026-11-12，0.19.1）**：
+  · **界面归位**：删掉独立的「语音引擎」卡片，合并进「语音朗读」卡片的 **【音色】小节**；
+    男/女声下拉随引擎换表（windows ↔ kokoro），两套音色配置各自独立保存、切换互不覆盖。
+  · **复查修掉 4 个真实缺陷**：
+    1. `/api/status` 不含 `tts.kokoro.voiceMale/voiceFemale`，前端却从那里读 →
+       每次重载页面 Kokoro 音色都回退成第一个。改为由 `/api/tts/voices` 的
+       `engines.kokoro` 一并返回（含 `threads`）。
+    2. 首屏并发竞态：`loadConfig()` 早于 `loadStatus()` 时把「状态未知」误判为「未安装」，
+       把引擎下拉强制重置为 windows，覆盖掉 `loadTtsEngines` 已设好的 kokoro。
+       改为只有**确认未安装**才降级。
+    3. `ttsVoicesLoaded` 只写不读 → 每次切到「实验功能」页都重新起 PowerShell 枚举系统语音
+       （约 0.4s）。改为命中缓存即只重填下拉（`force` 仍可强制刷新）。
+    4. 未先打开「实验功能」页就直接进 NPC 页时 `ttsKokoro.voices` 为空，
+       专属音色下拉不显示。改为 `loadNpcDetail` 在清单未加载时先取一次。
+    另清理 `install.js` 未使用的 `MODEL_FILES` 导入。
+  · **回归 34 项全通过**（模块级 9 + 端到端 25），新增覆盖：
+    `voices-kokoro-voice-saved`（重载后音色不回退）、`save-windows-only`（保存一套不影响另一套）、
+    `kokoro-kept` / `windows-voices-kept`（切引擎后两套配置各自保留）。
+  · **浏览器实测**：重载后 `engine=kokoro`、女声 `zf_xiaoyi`、男声 `zm_yunxi` 与配置一致；
+    切 windows→kokoro→windows 两组下拉均正确换表并保留各自已选值；直接进 NPC 页可见
+    「Kokoro 专属音色」下拉；全站 115 个 id **无重复**；控制台无报错。
+  · **出包** `WorldApartNpcAgent-0.19.1-win-portable.exe`（95.4 MB / 100,056,457 B），
+    FileVersion/ProductVersion = 0.19.1；同层 `releases/tts-engines/`（10 个文件 / 159.2 MB）。
+  · **exe 冒烟**：`version=0.19.1`、`kokoroInstalled=True`、`/api/tts/voices` 带
+    `voiceFemale/voiceMale`；Kokoro 试听 200 / 58 KB、Windows 试听 200 / 56 KB；
+    页面含 `tts-sub` 音色小节、前端含 `renderVoiceSelects`；关窗后进程全退、端口释放。

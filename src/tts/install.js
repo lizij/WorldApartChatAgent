@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { ENGINE_DIR, RUNTIME_DIR, MODEL_FILES, EXE_PATH, DLL_PATH, isInstalled, KOKORO_VOICES } from './kokoro.js';
+import { ENGINE_DIR, RUNTIME_DIR, EXE_PATH, DLL_PATH, isInstalled, KOKORO_VOICES } from './kokoro.js';
 
 const KOKORO_VOICE_COUNT = KOKORO_VOICES.length;
 

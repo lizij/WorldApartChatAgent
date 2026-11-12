@@ -1103,6 +1103,11 @@ export function createServer({ config, logger, getPortFallback = null }) {
             bytes: kstatus.bytes,
             downloadBytes: kstatus.downloadBytes,
             voices: KOKORO_VOICES,
+            // 当前保存的 Kokoro 音色。前端只能从这里拿——
+            // /api/status 的 tts 段不含这一项，否则重载页面后下拉会回退成第一个。
+            voiceMale: c.tts.kokoro.voiceMale,
+            voiceFemale: c.tts.kokoro.voiceFemale,
+            threads: c.tts.kokoro.threads,
             state: kstatus.state,
           },
         },
