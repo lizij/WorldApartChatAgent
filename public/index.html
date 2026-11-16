@@ -99,131 +99,235 @@
 
   <!-- 实验功能：多 NPC 共演 + 请求重写 -->
   <section id="tab-labs" class="tab-pane">
-    <div class="card">
-      <h2>多 NPC 共演 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
-      <div class="kv">
-        <label class="check"><input type="checkbox" id="castEnabled" /> 启用多 NPC 共演（默认关闭）</label>
-        <p class="hint">开启后，玩家可以用括号把另一位 NPC 拉进当前对话（如「（章籽梦走进来）章籽梦，你怎么看」）。配角会<strong>单独请求上游</strong>，主角只能看到配角的公开台词，不会拿到配角的设定与记忆。每轮最多 2 次发言调用；关闭时对原有对话零影响。<br />注意：只有在该 NPC 详情里勾选「允许作为配角参与共演」的 NPC 才会被邀请；默认全部关闭。调试也可直接发 <code>/invite 名字</code>、<code>/remove 名字</code>。</p>
-        <div class="grid three advanced">
-          <label>同场配角上限<input type="number" id="castMaxCoStars" min="1" max="2" step="1" /></label>
-          <label>每轮发言调用上限<input type="number" id="castMaxCalls" min="1" max="2" step="1" /></label>
-          <label>共享对话条数<input type="number" id="castTranscriptTurns" min="1" max="40" step="1" /></label>
+    <div class="card stack">
+      <div class="card-head">
+        <h2>多 NPC 共演</h2>
+        <div class="tags"><span class="tag warn">实验性</span><span class="tag">额外 token</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="castEnabled" />
+        <span>启用共演</span>
+        <em>把另一位 NPC 拉进当前对话</em>
+      </label>
+
+      <details class="fold">
+        <summary>高级设置</summary>
+        <div class="fold-body">
+          <div class="grid three">
+            <label>同场配角上限<input type="number" id="castMaxCoStars" min="1" max="2" step="1" /></label>
+            <label>每轮发言调用<input type="number" id="castMaxCalls" min="1" max="2" step="1" /></label>
+            <label>共享对话条数<input type="number" id="castTranscriptTurns" min="1" max="40" step="1" /></label>
+          </div>
+          <div class="grid three">
+            <label>配角开口
+              <select id="castSpeakPolicy">
+                <option value="addressed">被点名才开口</option>
+                <option value="always">在场每轮都接</option>
+              </select>
+            </label>
+            <label>多人输出格式
+              <select id="castOutputStyle">
+                <option value="script">剧本式（名字：台词）</option>
+                <option value="inherit">沿用第一人称</option>
+              </select>
+            </label>
+            <label>主角说完后等（毫秒）<input type="number" id="castTailWait" min="500" step="500" /></label>
+          </div>
+          <div class="grid three">
+            <label>超时清场（分钟）<input type="number" id="castAutoExitMin" min="1" max="1440" step="1" /></label>
+          </div>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="castAllowSilence" /> 玩家点名配角时，允许主角只给在旁反应</label>
+            <label class="check"><input type="checkbox" id="castWritesMemory" /> 配角写入自己的长期记忆</label>
+            <label class="check"><input type="checkbox" id="castSkipOnTask" /> 任务 / 话题轮自动退化为单人戏</label>
+            <label class="check"><input type="checkbox" id="castAutoStage" /> NPC 自动进场和离场</label>
+          </div>
         </div>
-        <div class="grid three advanced">
-          <label>配角开口策略
-            <select id="castSpeakPolicy">
-              <option value="addressed">被点名才开口（推荐）</option>
-              <option value="always">在场每轮都接</option>
-            </select>
-          </label>
-          <label>多人输出格式
-            <select id="castOutputStyle">
-              <option value="script">剧本式（名字：台词）</option>
-              <option value="inherit">沿用第一人称</option>
-            </select>
-          </label>
-          <label>A 先说完后等配角（毫秒）<input type="number" id="castTailWait" min="500" step="500" /></label>
+      </details>
+
+      <details class="fold">
+        <summary>说明与调试指令</summary>
+        <div class="fold-body">
+          <p class="hint">
+            开启后可用括号把另一位 NPC 拉进对话（如「（章籽梦走进来）章籽梦，你怎么看」）。
+            配角走<strong>单独请求上游</strong>，主角只能看到配角的公开台词，拿不到其设定与记忆；
+            每轮最多 2 次发言调用。关闭时对原有对话零影响。
+          </p>
+          <p class="hint">
+            只有在「NPC 记忆」页勾选过「允许作为配角参与共演」的 NPC 才会被邀请，默认全部关闭。
+          </p>
+          <p class="hint">
+            <strong>关闭自动进出场时</strong>：只认显式指令——<code>/invite 名字</code>、<code>/add 名字</code> 入场，
+            <code>/leave 名字</code>、<code>/remove 名字</code> 离场；台词与括号动作只当叙事事实。
+            <br /><strong>开启时</strong>：额外允许按台词自动调度（「（章籽梦离开了）」等），更省事但措辞可能被误判。
+          </p>
         </div>
-        <div class="grid three advanced">
-          <label>超时清场（分钟，其间无来往即请出配角）<input type="number" id="castAutoExitMin" min="1" max="1440" step="1" /></label>
-        </div>
-        <label class="check"><input type="checkbox" id="castAllowSilence" /> 玩家点名配角时，允许主角只给在旁反应（不接话）</label>
-        <label class="check"><input type="checkbox" id="castWritesMemory" /> 配角写入自己的长期记忆（默认关闭）</label>
-        <label class="check"><input type="checkbox" id="castSkipOnTask" /> 任务 / 话题轮自动退化为单人戏</label>
-        <label class="check"><input type="checkbox" id="castAutoStage" /> NPC 自动进场和离场（默认关闭）</label>
-        <p class="hint">关闭时：配角进出场只认显式指令——<code>/invite 名字</code>、<code>/add 名字</code> 请人入场，
-          <code>/leave 名字</code>、<code>/remove 名字</code> 请人离场；台词与括号里的动作只当叙事事实，
-          不会改变在场状态（无来往超过“超时清场”时长会自动离场）。<br />开启时：额外允许按台词自动调度
-          （如「（章籽梦走进来）」入场、「（章籽梦离开了）」离场、直呼其名可自动入场），更省事，但措辞可能被误判。</p>
-        <div class="row right"><button class="btn primary" id="saveCast">保存共演设置</button><span class="saved-hint" id="castSaved"></span></div>
+      </details>
+
+      <div class="card-foot">
+        <button class="btn primary" id="saveCast">保存共演设置</button>
+        <span class="saved-hint" id="castSaved"></span>
       </div>
     </div>
 
-    <div class="card">
-      <h2>请求重写 <span class="tag warn">实验性</span> <span class="tag warn">额外 token 消耗</span></h2>
-      <div class="kv">
-        <label class="check"><input type="checkbox" id="rwEnabled" /> 启用请求重写（默认关闭）</label>
-        <p class="hint">启用后，每次 NPC 对话会先额外调用一次上游模型，<strong>逐条改写游戏下发的设定类 system 模块</strong>（世界观、角色设定、场景、任务、输出格式等，真实请求通常有多条），删除或改写其中与本工具外置提示词／长期记忆冲突的部分，再生成回复。游戏已结算的事实模块（<code>【相关经历】</code>、<code>【人物关系】</code>、<code>【任务接取】</code>、<code>【任务交付】</code>、<code>【好感变化】</code>、<code>【赠出礼物】</code> 等）原样透传，不参与重写；<code>## 输出格式</code> 里的 JSON 结构始终逐字保留。首字延迟与 token 消耗都会明显增加；重写失败或单个模块校验不通过时，该模块自动回退原文。</p>
-        <label>重写缓存机制</label>
+    <div class="card stack">
+      <div class="card-head">
+        <h2>请求重写</h2>
+        <div class="tags"><span class="tag warn">实验性</span><span class="tag">额外 token</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="rwEnabled" />
+        <span>启用请求重写</span>
+        <em>先清理与你的设定冲突的游戏 system</em>
+      </label>
+
+      <div class="field">
+        <label>缓存机制</label>
         <div class="cache-modes" id="rwCacheModes"></div>
         <p class="hint" id="rwCacheModeHint"></p>
-        <div class="grid three advanced">
-          <label>重写输出上限（tokens，不足时自动上调）<input type="number" id="rwMaxTokens" min="500" step="500" /></label>
-          <label>重写超时（毫秒）<input type="number" id="rwTimeout" min="5000" step="5000" /></label>
-          <label>重写温度<input type="number" id="rwTemperature" min="0" max="2" step="0.1" /></label>
+      </div>
+
+      <details class="fold">
+        <summary>高级设置</summary>
+        <div class="fold-body">
+          <div class="grid three">
+            <label>输出上限（tokens）<input type="number" id="rwMaxTokens" min="500" step="500" /></label>
+            <label>超时（毫秒）<input type="number" id="rwTimeout" min="5000" step="5000" /></label>
+            <label>温度<input type="number" id="rwTemperature" min="0" max="2" step="0.1" /></label>
+          </div>
         </div>
-        <div class="row right"><button class="btn primary" id="saveRewrite">保存重写设置</button><span class="saved-hint" id="rwSaved"></span></div>
+      </details>
+
+      <details class="fold">
+        <summary>说明</summary>
+        <div class="fold-body">
+          <p class="hint">
+            每次 NPC 对话会先额外调用一次上游，<strong>逐条改写游戏下发的设定类 system 模块</strong>
+            （世界观、角色设定、场景等），删掉与本工具外置提示词 / 长期记忆冲突的部分，再生成回复。
+          </p>
+          <p class="hint">
+            游戏已结算的事实模块（<code>【相关经历】</code>、<code>【任务接取】</code>、
+            <code>【好感变化】</code> 等）原样透传；<code>## 输出格式</code> 的 JSON 结构逐字保留。
+            首字延迟与 token 消耗都会增加；失败或单个模块校验不通过时自动回退该模块原文。
+          </p>
+        </div>
+      </details>
+
+      <div class="card-foot">
+        <button class="btn primary" id="saveRewrite">保存重写设置</button>
+        <span class="saved-hint" id="rwSaved"></span>
       </div>
     </div>
 
-    <div class="card">
-      <h2>语音朗读 <span class="tag warn">实验性</span></h2>
-      <div class="kv">
-        <label class="check"><input type="checkbox" id="ttsEnabled" /> 自动朗读新回复（默认关闭）</label>
-        <p class="hint">
-          离线合成，免费、无需 Key、不联网；声音由本窗口播放，窗口最小化也能听到。
-          开启后每条新到的 NPC 回复会自动朗读；关闭时<strong>完全不会合成</strong>，也不会启动任何系统进程。
-          历史回复不补播——可在「执行日志」里点每条记录上的 ▶ 手动朗读。
-        </p>
-        <p class="hint warn" id="ttsNotice" hidden></p>
-        <div class="grid two">
-          <label>朗读范围
-            <select id="ttsReadMode">
-              <option value="all">全部内容（含旁白）</option>
-              <option value="dialogue">仅对白（引号内台词）</option>
-            </select>
-          </label>
-          <label class="check" id="ttsSkipWrap"><input type="checkbox" id="ttsSkipActions" /> 跳过括号内的动作描写（如「（她抿了口茶）」）</label>
-        </div>
+    <div class="card stack">
+      <div class="card-head">
+        <h2>语音朗读</h2>
+        <div class="tags"><span class="tag warn">实验性</span></div>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="ttsEnabled" />
+        <span>自动朗读新回复</span>
+        <em>声音由本窗口播放，最小化也能听到</em>
+      </label>
+      <p class="hint warn" id="ttsNotice" hidden></p>
 
-        <h4 class="tts-sub">音色</h4>
-        <p class="hint">
-          引擎决定可选的声音：<strong>Windows 内置语音</strong>即时出声（首音约 0.5 秒）但偏机械；
-          <strong>Kokoro 神经语音</strong>接近真人，但合成比播放慢（6 秒台词约需 8 秒）。
-        </p>
-        <div class="grid two">
-          <label>音色引擎
-            <select id="ttsEngine">
-              <option value="windows">Windows 内置语音（即时）</option>
-              <option value="kokoro">Kokoro 神经语音（接近真人）</option>
-            </select>
-          </label>
-          <label>Kokoro 状态<input id="ttsKokoroStatus" readonly /></label>
-        </div>
-        <div class="row" id="ttsInstallRow">
-          <button class="btn primary sm" id="ttsInstall">下载并安装 Kokoro（约 <span id="ttsKokoroSize">162</span> MB）</button>
-          <span class="saved-hint" id="ttsInstallMsg"></span>
-        </div>
-        <div id="ttsInstallProgress" hidden>
-          <div class="tts-bar"><div class="tts-bar-fill" id="ttsBarFill"></div></div>
-          <p class="hint" id="ttsInstallDetail"></p>
-        </div>
-        <div class="grid two">
-          <label>男声音色<select id="ttsVoiceMale"></select></label>
-          <label>女声音色<select id="ttsVoiceFemale"></select></label>
-        </div>
-        <div class="row">
-          <button class="btn sm" id="ttsPreviewMale">男声试听</button>
-          <button class="btn sm" id="ttsPreviewFemale">女声试听</button>
-          <button class="btn sm" id="ttsRefreshVoices">重新检测</button>
-          <button class="btn sm" id="ttsStop">停止朗读</button>
-          <span class="saved-hint" id="ttsStatus"></span>
-        </div>
-        <p class="hint" id="ttsEngineHint"></p>
+      <div class="grid two">
+        <label>朗读范围
+          <select id="ttsReadMode">
+            <option value="all">全部内容（含旁白）</option>
+            <option value="dialogue">仅对白（引号内台词）</option>
+          </select>
+        </label>
+        <label class="check" id="ttsSkipWrap"><input type="checkbox" id="ttsSkipActions" /> 跳过括号内的动作描写</label>
+      </div>
 
-        <div class="grid three advanced">
-          <label>语速<input type="number" id="ttsRate" min="0.5" max="3" step="0.05" /></label>
-          <label>音调<input type="number" id="ttsPitch" min="0.5" max="2" step="0.05" /></label>
-          <label>单条字数上限<input type="number" id="ttsMaxChars" min="50" max="5000" step="50" /></label>
+      <h4 class="tts-sub">音色</h4>
+      <div class="grid two">
+        <label>男声<select id="ttsVoiceMale"></select></label>
+        <label>女声<select id="ttsVoiceFemale"></select></label>
+      </div>
+      <p class="hint warn" id="ttsCloudNotice" hidden></p>
+      <div class="row">
+        <button class="btn sm" id="ttsPreviewMale">男声试听</button>
+        <button class="btn sm" id="ttsPreviewFemale">女声试听</button>
+        <button class="btn sm" id="ttsRefreshVoices">重新检测</button>
+        <button class="btn sm" id="ttsStop">停止朗读</button>
+        <span class="saved-hint" id="ttsStatus"></span>
+      </div>
+
+      <details class="fold">
+        <summary>引擎状态与管理</summary>
+        <div class="fold-body">
+          <div class="grid two">
+            <label>Windows / Kokoro<input id="ttsKokoroStatus" class="status" readonly /></label>
+            <label>云端（DeepSeek）<input id="ttsCloudStatus" class="status" readonly /></label>
+          </div>
+          <div class="row" id="ttsInstallRow">
+            <button class="btn primary sm" id="ttsInstall">下载并安装 Kokoro（约 <span id="ttsKokoroSize">162</span> MB）</button>
+            <span class="saved-hint" id="ttsInstallMsg"></span>
+          </div>
+          <div id="ttsInstallProgress" hidden>
+            <div class="tts-bar"><div class="tts-bar-fill" id="ttsBarFill"></div></div>
+            <p class="hint" id="ttsInstallDetail"></p>
+          </div>
+          <p class="hint" id="ttsEngineHint"></p>
+
+          <h4 class="tts-sub">云端引擎：DeepSeek</h4>
+          <p class="hint" id="ttsCloudHint"></p>
+          <details id="ttsCloudDetails" class="fold nested">
+            <summary><span id="ttsCloudSummaryText">地址 / API Key / 超时</span></summary>
+            <div class="fold-body">
+              <div class="grid two">
+                <label>配置方式
+                  <select id="ttsCloudMode">
+                    <option value="auto">上游是 DeepSeek 时自动复用</option>
+                    <option value="manual">始终用下面的独立配置</option>
+                  </select>
+                </label>
+                <label>超时（秒）<input type="number" id="ttsCloudTimeout" min="5" max="300" step="5" /></label>
+              </div>
+              <div id="ttsCloudBox">
+                <div class="grid two">
+                  <label>接口地址<input id="ttsCloudBaseUrl" placeholder="https://api.deepseek.com" /></label>
+                  <label>API Key<input type="password" id="ttsCloudApiKey" placeholder="留空则保持不变" /></label>
+                </div>
+                <div class="row">
+                  <button class="btn sm" id="ttsCloudTest">测试连接</button>
+                  <span class="saved-hint" id="ttsCloudTestMsg"></span>
+                </div>
+              </div>
+              <p class="hint">
+                计费：汉字算 2 字符、其余 1 字符，¥3 / 万字符（限时 5 折）。云端不支持调语速与音调。
+                合成结果缓存在 <code>data/npcs/&lt;NPC&gt;/tts-cache/</code>，同一句不会重复计费。
+              </p>
+            </div>
+          </details>
         </div>
-        <div class="grid two">
-          <label>播放音量<input type="number" id="ttsVolume" min="0" max="1" step="0.05" /></label>
-          <label>朗读默认音色（性别判定不出时）<select id="ttsDefaultGender">
-            <option value="female">女声</option>
-            <option value="male">男声</option>
-          </select></label>
+      </details>
+
+      <details class="fold">
+        <summary>朗读参数</summary>
+        <div class="fold-body">
+          <div class="grid three">
+            <label>语速<input type="number" id="ttsRate" min="0.5" max="3" step="0.05" /></label>
+            <label>音调<input type="number" id="ttsPitch" min="0.5" max="2" step="0.05" /></label>
+            <label>单条字数上限<input type="number" id="ttsMaxChars" min="50" max="5000" step="50" /></label>
+          </div>
+          <div class="grid two">
+            <label>播放音量<input type="number" id="ttsVolume" min="0" max="1" step="0.05" /></label>
+            <label>判定不出性别时
+              <select id="ttsDefaultGender">
+                <option value="female">用女声</option>
+                <option value="male">用男声</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <div class="row right"><button class="btn primary" id="saveTts">保存语音设置</button><span class="saved-hint" id="ttsSaved"></span></div>
+      </details>
+
+      <div class="card-foot">
+        <button class="btn primary" id="saveTts">保存语音设置</button>
+        <span class="saved-hint" id="ttsSaved"></span>
       </div>
     </div>
   </section>

@@ -15,9 +15,9 @@ import {
   PUBLIC_DIR,
   VERSION,
   REWRITE_CACHE_MODES,
-  upstreamChatUrl,
   effectiveMemoryChars,
   effectiveInjectChars,
+  deepMerge,
 } from './config.js';
 import { classify, isFactModule, mergePendingFacts } from './identify.js';
 import {
@@ -50,21 +50,29 @@ import { loadStage, saveStage } from './cast/stage.js';
 import { entryOf, loadAliases, saveAliases, saveCastFlag } from './cast/registry.js';
 import {
   speak,
-  synthesize,
-  synthesizeKokoro,
   listVoices,
-  resolveVoice,
   readVoice,
   saveVoice,
   isVoiceEnabled,
+  detectGender,
   reset as ttsReset,
   shutdown as ttsShutdown,
   installKokoro,
   kokoroStatus,
   isKokoroInstalled,
   KOKORO_VOICES,
-  ENGINE_IDS,
-  pickKokoroVoice,
+  DEEPSEEK_VOICES,
+  ENGINE_LABEL,
+  pickVoice,
+  parseVoiceId,
+  listAllVoices,
+  resolveVoiceById,
+  synthesizeById,
+  engineStatus,
+  resolveCloudConfig,
+  testCloudConnection,
+  clearCloudCache,
+  cloudCacheStats,
 } from './tts/index.js';
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -483,11 +491,9 @@ export function createServer({ config, logger, getPortFallback = null }) {
         // 只给开关与参数，语音清单另走 /api/tts/voices（枚举要起一次 PowerShell）
         tts: {
           enabled: !!c.tts.enabled,
-          engine: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
-          // 引擎不再静默降级：activeEngine 就是配置里的那个，
-          // 是否真的能用看 engineReady（缺引擎时朗读会报错，见 docs/tts.md §19）。
-          activeEngine: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
-          engineReady: c.tts.engine === 'kokoro' ? isKokoroInstalled() : true,
+          // 音色是统一 ID（<引擎>:<音色>），不再有"全局引擎"概念
+          voices: { male: c.tts.voices.male, female: c.tts.voices.female },
+          engines: engineStatus(c),
           kokoroInstalled: isKokoroInstalled(),
           readMode: c.tts.readMode,
           skipActions: !!c.tts.skipActions,
@@ -670,39 +676,79 @@ export function createServer({ config, logger, getPortFallback = null }) {
       for (const k of ['enabled', 'skipActions']) {
         if (t[k] !== undefined) safe.tts[k] = !!t[k];
       }
-      // 只有装了 Kokoro 才允许切过去，否则保持 windows（避免存一个用不了的引擎）
-      if (t.engine !== undefined) {
-        if (!ENGINE_IDS.includes(t.engine)) {
-          return sendJsonError(res, 400, 'bad_request', `未知的语音引擎: ${t.engine}`);
-        }
-        if (t.engine === 'kokoro' && !isKokoroInstalled()) {
-          return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装，请先在「实验功能」里下载');
-        }
-        safe.tts.engine = t.engine;
-      }
       if (t.readMode === 'all' || t.readMode === 'dialogue') safe.tts.readMode = t.readMode;
       if (t.defaultGender === 'male' || t.defaultGender === 'female') safe.tts.defaultGender = t.defaultGender;
-      // 语音名：空串视为"回到默认"，仍按字符串收下（前端可能清空下拉）
+
+      // 音色：统一 ID（<引擎>:<音色>）。空串表示"回到自动"，仍收下（前端可能清空下拉）。
+      // 非空时必须能在该引擎的真实清单里找到，否则 400 —— 不允许存一个念不出来的音色。
+      //
+      // 注意：同一请求里可能同时提交云端 Key 与云端音色（用户第一次配置就是这样），
+      // 所以校验云端可用性必须用**合并后的临时配置**，不能用当前已保存的旧配置，
+      // 否则会出现"明明填了 Key 却报未配置"的死锁。
+      const pendingCfg = t.cloud && typeof t.cloud === 'object' ? deepMerge(config.get(), { tts: { cloud: t.cloud } }) : config.get();
       if (t.voices && typeof t.voices === 'object') {
         safe.tts.voices = {};
         for (const g of ['male', 'female']) {
-          if (typeof t.voices[g] === 'string') safe.tts.voices[g] = t.voices[g].trim().slice(0, 200);
+          const raw = t.voices[g];
+          if (typeof raw !== 'string') continue;
+          const v = raw.trim().slice(0, 200);
+          if (!v) {
+            safe.tts.voices[g] = '';
+            continue;
+          }
+          const parsed = parseVoiceId(v);
+          if (!parsed) {
+            return sendJsonError(res, 400, 'bad_request', `音色格式不正确（应为「引擎:音色」）: ${v}`);
+          }
+          if (parsed.engine === 'windows') {
+            const sys = await listVoices();
+            if (!sys.some((x) => x.name === parsed.voice)) {
+              return sendJsonError(res, 400, 'voice_unavailable', `系统里没有这个音色: ${parsed.voice}`);
+            }
+          } else if (parsed.engine === 'kokoro') {
+            if (!KOKORO_VOICES.some((x) => x.name === parsed.voice)) {
+              return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${parsed.voice}`);
+            }
+            if (!isKokoroInstalled()) {
+              return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装，请先在「实验功能」里下载');
+            }
+          } else if (parsed.engine === 'deepseek') {
+            if (!DEEPSEEK_VOICES.some((x) => x.id === parsed.voice)) {
+              return sendJsonError(res, 400, 'bad_request', `未知的 DeepSeek 音色: ${parsed.voice}`);
+            }
+            const cc = resolveCloudConfig(pendingCfg);
+            if (!cc.ready) {
+              return sendJsonError(res, 400, 'engine_unavailable', `${cc.reason}。请先在「实验功能 → 音色 → 云端引擎」配置。`);
+            }
+          }
+          safe.tts.voices[g] = parsed.id;
         }
       }
-      // Kokoro 音色（只接受清单里的名字）
+
+      // Kokoro 引擎参数（音色已并入 voices，这里只剩 threads）
       if (t.kokoro && typeof t.kokoro === 'object') {
         safe.tts.kokoro = {};
-        const valid = new Set(KOKORO_VOICES.map((v) => v.name));
-        for (const k of ['voiceFemale', 'voiceMale']) {
-          if (typeof t.kokoro[k] === 'string') {
-            const v = t.kokoro[k].trim();
-            if (v && !valid.has(v)) return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${v}`);
-            if (v) safe.tts.kokoro[k] = v;
-          }
-        }
         const th = intIn(t.kokoro.threads, 1, 8);
         if (th !== undefined) safe.tts.kokoro.threads = th;
       }
+
+      // 云端引擎配置
+      if (t.cloud && typeof t.cloud === 'object' && t.cloud.deepseek && typeof t.cloud.deepseek === 'object') {
+        const d = t.cloud.deepseek;
+        safe.tts.cloud = { deepseek: {} };
+        if (d.mode === 'auto' || d.mode === 'manual') safe.tts.cloud.deepseek.mode = d.mode;
+        if (typeof d.baseUrl === 'string') {
+          const u = d.baseUrl.trim().slice(0, 500);
+          if (u && !/^https?:\/\//i.test(u)) {
+            return sendJsonError(res, 400, 'bad_request', '云端地址必须以 http:// 或 https:// 开头');
+          }
+          safe.tts.cloud.deepseek.baseUrl = u;
+        }
+        if (typeof d.apiKey === 'string') safe.tts.cloud.deepseek.apiKey = d.apiKey.trim().slice(0, 300);
+        const to = intIn(d.timeoutMs, 5000, 300000);
+        if (to !== undefined) safe.tts.cloud.deepseek.timeoutMs = to;
+      }
+
       // 注意：volume/rate/pitch 都是小数，不能用 intIn（Math.floor 会把 0.8 压成 0）
       const clampFloat = (v, min, max) => {
         if (v === undefined || v === null || v === '' || typeof v === 'boolean') return undefined;
@@ -808,19 +854,12 @@ export function createServer({ config, logger, getPortFallback = null }) {
       } catch {}
     }
     const c0 = cfg();
-    const resolved = await resolveVoice(slug, c0.tts);
-    // 「配置里写的引擎」而不是「当前可用引擎」：Kokoro 缺失时不能让详情页
-    // 假装成系统语音（那等于静默换音色，见 docs/tts.md §19）。
-    const engineConfigured = c0.tts.engine === 'kokoro' ? 'kokoro' : 'windows';
     const perVoice = readVoice(slug);
+    const dv = detectGender(slug);
     const kGender =
-      perVoice.gender === 'male' || perVoice.gender === 'female'
-        ? perVoice.gender
-        : resolved.gender;
-    const picked = pickKokoroVoice(slug, c0, kGender);
-    const kokoroProblem = !isKokoroInstalled()
-      ? { code: 'engine_unavailable', detail: 'Kokoro 引擎缺失（tts-engines/kokoro）。朗读会报错，不会改用系统语音。' }
-      : picked.problem;
+      perVoice.gender === 'male' || perVoice.gender === 'female' ? perVoice.gender : dv.gender;
+    // 用与朗读完全相同的解析逻辑，详情页显示的就是真正会用的那个音色
+    const resolved = await pickVoice(slug, c0);
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
@@ -833,26 +872,21 @@ export function createServer({ config, logger, getPortFallback = null }) {
         aliases: loadAliases(slug),
         hasIntake: !!entryOf(slug)?.hasIntake,
         castEnabled: !!entryOf(slug)?.castEnabled,
-        voice: readVoice(slug),
-        engine: engineConfigured,
-        engineReady: engineConfigured === 'kokoro' ? isKokoroInstalled() : true,
-        // 只回传前端要展示的字段：available 是完整语音清单，体积大且另有 /api/tts/voices
-        voiceResolved: engineConfigured === 'kokoro'
-          ? {
-              gender: picked.voice ? picked.voice.gender : kGender,
-              voiceName: picked.voice ? picked.voice.name : null,
-              voiceLabel: picked.voice ? picked.voice.label : null,
-              reason: picked.voice
-                ? (perVoice.voice ? '该 NPC 指定了 Kokoro 音色' : `按${picked.voice.gender === 'male' ? '男' : '女'}声取全局默认`)
-                : '音色不可用',
-              ...(kokoroProblem ? { problem: kokoroProblem } : {}),
-            }
-          : {
-              gender: resolved.gender,
-              voiceName: resolved.voiceName,
-              reason: resolved.reason,
-              ...(resolved.problem ? { problem: resolved.problem } : {}),
-            },
+        voice: perVoice,
+        // 性别判定的依据，界面上要显示出来（方便发现判错）
+        gender: { value: kGender, reason: dv.reason, decided: dv.decided },
+        // 只回传前端要展示的字段：完整音色清单另有 /api/tts/voices
+        voiceResolved: {
+          gender: resolved.voice ? resolved.voice.gender : kGender,
+          voiceId: resolved.voice ? resolved.voice.id : null,
+          voiceName: resolved.voice ? resolved.voice.voice : null,
+          voiceLabel: resolved.voice ? resolved.voice.label : null,
+          engine: resolved.voice ? resolved.voice.engine : null,
+          engineLabel: resolved.voice ? resolved.voice.engineLabel : null,
+          kind: resolved.voice ? resolved.voice.kind : null,
+          reason: resolved.reason,
+          ...(resolved.problem ? { problem: resolved.problem } : {}),
+        },
       }),
     );
   }
@@ -1087,47 +1121,55 @@ export function createServer({ config, logger, getPortFallback = null }) {
     logger.append(rec, undefined, { fileOnly: rec.status !== 'error' });
   }
 
-  /** 系统中文语音清单（枚举要起一次 PowerShell，缓存 10 分钟）。 */
+  /** 统一音色清单（含各引擎状态；系统语音枚举要起一次 PowerShell，缓存 10 分钟）。 */
   async function handleTtsVoices(req, res, url) {
     const force = url.searchParams.get('refresh') === '1';
-    const voices = await listVoices({ force });
     const c = cfg();
     const kstatus = kokoroStatus();
+    // 一次性拿到所有引擎的音色（Windows / Kokoro / DeepSeek），每项自带引擎来源与可用性
+    const all = await listAllVoices(c, { force });
+    const cloud = resolveCloudConfig(c);
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify({
-        ok: voices.length > 0 || kstatus.installed,
-        voices,
-        suggested: {
-          male: voices.some((v) => v.name === c.tts.voices.male) ? c.tts.voices.male : null,
-          female: voices.some((v) => v.name === c.tts.voices.female) ? c.tts.voices.female : null,
+        ok: all.some((v) => v.available),
+        // 统一清单：[{ id, engine, engineLabel, kind, voice, label, gender, available, note }]
+        voices: all,
+        // 当前保存的两套音色（统一 ID）以及它们是否仍可用
+        current: {
+          male: c.tts.voices.male || '',
+          female: c.tts.voices.female || '',
         },
-        // 引擎与音色清单（前端据此渲染下拉与安装按钮）
+        voiceAvailable: {
+          male: all.some((v) => v.id === c.tts.voices.male && v.available),
+          female: all.some((v) => v.id === c.tts.voices.female && v.available),
+        },
         engines: {
-          // current 与 configured 相同：引擎不再静默降级，缺失时由 UI 明确提示
-          current: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
-          configured: c.tts.engine === 'kokoro' ? 'kokoro' : 'windows',
-          // 配置的音色是否仍然存在（前端用于显示「已失效」，而不是换成第一个）
-          voicesAvailable: {
-            male: voices.some((v) => v.name === c.tts.voices.male),
-            female: voices.some((v) => v.name === c.tts.voices.female),
-          },
+          windows: { label: ENGINE_LABEL.windows, kind: 'local', ready: all.some((v) => v.engine === 'windows' && v.available) },
           kokoro: {
+            label: ENGINE_LABEL.kokoro,
+            kind: 'local',
             installed: kstatus.installed,
             bytes: kstatus.bytes,
             downloadBytes: kstatus.downloadBytes,
-            voices: KOKORO_VOICES,
-            // 当前保存的 Kokoro 音色。前端只能从这里拿——
-            // /api/status 的 tts 段不含这一项，否则重载页面后下拉会回退成第一个。
-            voiceMale: c.tts.kokoro.voiceMale,
-            voiceFemale: c.tts.kokoro.voiceFemale,
             threads: c.tts.kokoro.threads,
             state: kstatus.state,
           },
+          deepseek: {
+            label: ENGINE_LABEL.deepseek,
+            kind: 'cloud',
+            ready: cloud.ready,
+            source: cloud.source,
+            reason: cloud.reason,
+            baseUrl: cloud.baseUrl,
+            hasApiKey: !!c.tts.cloud?.deepseek?.apiKey,
+            mode: c.tts.cloud?.deepseek?.mode || 'auto',
+            timeoutMs: cloud.timeoutMs,
+          },
         },
-        hint: voices.length
+        hint: all.some((v) => v.available)
           ? ''
-          : '系统里没有可用的中文语音。请在 Windows「设置 → 时间和语言 → 语音」中添加中文语音包。',
+          : '没有可用的音色。请在 Windows「设置 → 时间和语言 → 语音」里添加中文语音包，或配置云端引擎。',
       }),
     );
   }
@@ -1156,6 +1198,57 @@ export function createServer({ config, logger, getPortFallback = null }) {
     const s = kokoroStatus();
     res.setHeader('content-type', 'application/json; charset=utf-8');
     res.end(JSON.stringify({ ok: true, ...s }));
+  }
+
+  /** 云端引擎连通性测试（界面「测试连接」按钮）。 */
+  async function handleTtsCloudTest(req, res) {
+    let body = null;
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8'));
+    } catch {
+      body = null;
+    }
+    const c = cfg();
+    // 允许带未保存的临时配置来测（用户刚填完还没点保存）
+    let testCfg = c;
+    if (body && typeof body === 'object') {
+      const d = body.deepseek;
+      if (d && typeof d === 'object') {
+        testCfg = {
+          ...c,
+          tts: {
+            ...c.tts,
+            cloud: {
+              ...c.tts.cloud,
+              deepseek: {
+                ...c.tts.cloud?.deepseek,
+                ...(d.mode === 'auto' || d.mode === 'manual' ? { mode: d.mode } : {}),
+                ...(typeof d.baseUrl === 'string' ? { baseUrl: d.baseUrl.trim() } : {}),
+                ...(typeof d.apiKey === 'string' && d.apiKey.trim() ? { apiKey: d.apiKey.trim() } : {}),
+              },
+            },
+          },
+        };
+      }
+    }
+    const r = await testCloudConnection(testCfg);
+    logger.append({
+      kind: 'tts',
+      status: r.ok ? 'done' : 'error',
+      action: 'cloud_test',
+      ...(r.ok ? { synthMs: r.ms } : { error: `${r.reason}:${r.detail || ''}` }),
+    });
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(r));
+  }
+
+  /** 清空某个 NPC 的云端语音缓存。 */
+  function handleClearTtsCache(req, res, slugRaw) {
+    const hit = resolveNpcDir(res, slugRaw);
+    if (!hit) return;
+    const n = clearCloudCache(hit.slug);
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify({ ok: true, removed: n, ...cloudCacheStats(hit.slug) }));
   }
 
 
@@ -1212,10 +1305,12 @@ export function createServer({ config, logger, getPortFallback = null }) {
     const baseLog = {
       kind: 'tts',
       slug,
-      engine: result.engine || 'windows',
+      engine: result.engine || null,
+      engineLabel: result.engineLabel || null,
       mode: result.mode,
       chars: result.chars,
-      voice: result.voiceName,
+      voice: result.voiceId || result.voiceName,
+      voiceLabel: result.voiceLabel || null,
       gender: result.gender,
       auto,
       synthMs: result.synthMs ?? Date.now() - started,
@@ -1223,11 +1318,17 @@ export function createServer({ config, logger, getPortFallback = null }) {
     };
 
     if (!result.ok) {
-      const reason = result.reason || (result.engine === 'kokoro' ? 'kokoro_failed' : 'tts_powershell_failed');
+      const reason = result.reason || 'tts_failed';
       // 「这条没东西可读」是正常情况，不算故障：记 skipped，且不进界面
       const benign = reason === 'empty_text' || reason === 'not_plain_text';
       // 音色/引擎不可用是**配置问题**，不是合成故障：明确报 409，绝不换音色顶上。
-      const unavailable = reason === 'voice_unavailable' || reason === 'engine_unavailable' || reason === 'tts_no_voice';
+      // 云端鉴权/内容审核失败同样属于"配错了或这条念不了"，用 409 让界面走提示而不是故障。
+      const unavailable =
+        reason === 'voice_unavailable' ||
+        reason === 'engine_unavailable' ||
+        reason === 'tts_no_voice' ||
+        reason === 'cloud_auth_failed' ||
+        reason === 'cloud_content_risk';
       logTts({
         ...baseLog,
         status: benign || reason === 'tts_stopping' ? 'skipped' : 'error',
@@ -1247,7 +1348,7 @@ export function createServer({ config, logger, getPortFallback = null }) {
 
     logTts({ ...baseLog, status: 'done', bytes: result.wav.length });
     res.writeHead(200, {
-      'content-type': 'audio/wav',
+      'content-type': result.mime || 'audio/wav',
       'content-length': result.wav.length,
       'cache-control': 'no-store',
     });
@@ -1281,88 +1382,66 @@ export function createServer({ config, logger, getPortFallback = null }) {
     // 没指定才按性别取配置里的默认音色。
     // 注意：不能只用 gender —— 那样换下拉框里的音色也永远听同一个声音。
     //
-    // engine=kokoro 时 voice 是 Kokoro 音色名（zf_xiaoxiao 等）；否则是系统语音名。
-    const wantEngine = body?.engine === 'kokoro' ? 'kokoro' : body?.engine === 'windows' ? 'windows' : (c.tts.engine === 'kokoro' ? 'kokoro' : 'windows');
+    // voice 现在是统一 ID（<引擎>:<音色>）；也接受旧格式的裸名（按 windows 处理）。
     const started = Date.now();
+    const asked = strIn(body?.voice, 200);
+    const fallbackId = gender === 'male' ? c.tts.voices.male : c.tts.voices.female;
 
-    if (wantEngine === 'kokoro') {
-      if (!isKokoroInstalled()) {
-        return sendJsonError(res, 400, 'engine_not_installed', 'Kokoro 引擎尚未安装');
+    let picked = null;
+    if (asked) {
+      const r = await resolveVoiceById(asked, c);
+      if (r.problem) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${asked}` });
+        return sendJsonError(res, 409, r.problem.code, r.problem.detail);
       }
-      // 调用方明确点了某个音色就必须用它；点了却不存在 → 报错，不替换成别的音色
-      const asked = strIn(body?.voice, 40);
-      const explicitK = asked ? KOKORO_VOICES.find((v) => v.name === asked) : null;
-      const defK = gender === 'male' ? c.tts.kokoro.voiceMale : c.tts.kokoro.voiceFemale;
-      let voice = explicitK;
-      if (!voice && asked) {
-        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', error: `voice_unavailable:${asked}` });
-        return sendJsonError(res, 409, 'voice_unavailable', `所选 Kokoro 音色「${asked}」不可用，请重新选择`);
-      }
-      if (!voice) voice = KOKORO_VOICES.find((v) => v.name === defK);
-      if (!voice) {
-        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', error: `voice_unavailable:${defK || '(未配置)'}` });
-        return sendJsonError(res, 409, 'voice_unavailable', `配置的 Kokoro 音色「${defK || '未配置'}」不可用，请重新选择`);
-      }
-      const r = await synthesizeKokoro({ text, voice: voice.name, rate, threads: c.tts.kokoro.threads });
-      if (!r.ok) {
-        logTts({ kind: 'tts', status: 'error', action: 'preview', engine: 'kokoro', voice: voice.name, chars: text.length, error: r.detail ? `${r.reason}:${r.detail}` : r.reason });
-        return sendJsonError(res, 500, r.reason || 'kokoro_failed', 'Kokoro 合成失败');
-      }
-      logTts({ kind: 'tts', status: 'done', action: 'preview', engine: 'kokoro', voice: voice.name, gender: voice.gender, chars: text.length, bytes: r.wav.length, synthMs: r.synthMs ?? Date.now() - started });
-      res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': r.wav.length, 'cache-control': 'no-store' });
-      return res.end(r.wav);
+      picked = r.voice;
     }
-
-    const voices = await listVoices();
-    const explicit = strIn(body?.voice, 200);
-    const want = gender === 'male' ? c.tts.voices.male : c.tts.voices.female;
-    let voiceName = null;
-    if (explicit) {
-      // 调用方点了某个系统语音就必须用它；不存在 → 报错，不替换
-      if (!voices.some((v) => v.name === explicit)) {
-        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${explicit}` });
-        return sendJsonError(res, 409, 'voice_unavailable', `所选系统语音「${explicit}」不可用，请重新选择`);
+    if (!picked && fallbackId) {
+      const r = await resolveVoiceById(fallbackId, c);
+      if (r.problem) {
+        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${fallbackId}` });
+        return sendJsonError(res, 409, r.problem.code, r.problem.detail);
       }
-      voiceName = explicit;
-    }
-    if (!voiceName && want) {
-      if (!voices.some((v) => v.name === want)) {
-        logTts({ kind: 'tts', status: 'error', action: 'preview', error: `voice_unavailable:${want}` });
-        return sendJsonError(res, 409, 'voice_unavailable', `配置的${gender === 'male' ? '男' : '女'}声音色「${want}」不可用，请重新选择`);
-      }
-      voiceName = want;
+      picked = r.voice;
     }
     // 到这里说明调用方没指定音色（或配置里为空），才按性别自动挑
-    if (!voiceName) voiceName = (voices.find((v) => v.gender === gender) || voices[0])?.name || null;
-    if (!voiceName) {
+    if (!picked) {
+      const all = await listAllVoices(c);
+      picked = all.find((v) => v.gender === gender && v.available) || all.find((v) => v.available) || null;
+    }
+    if (!picked) {
       logTts({ kind: 'tts', status: 'error', error: 'tts_no_voice', action: 'preview' });
-      return sendJsonError(res, 400, 'tts_no_voice', '系统里没有可用的中文语音');
+      return sendJsonError(res, 400, 'tts_no_voice', '没有可用的音色');
     }
 
-    const r = await synthesize({ text, voice: voiceName, rate, pitch });
+    const r = await synthesizeById({ voice: picked, text, slug: null, cfg: c, rate, pitch });
     if (!r.ok) {
       logTts({
         kind: 'tts',
         status: 'error',
         action: 'preview',
-        voice: voiceName,
+        engine: picked.engine,
+        voice: picked.id,
         chars: text.length,
         error: r.detail ? `${r.reason}:${r.detail}` : r.reason,
       });
-      return sendJsonError(res, 500, r.reason || 'tts_powershell_failed', '语音合成失败');
+      const unavailable = ['voice_unavailable', 'engine_unavailable', 'cloud_auth_failed'].includes(r.reason);
+      return sendJsonError(res, unavailable ? 409 : 500, r.reason || 'tts_failed', r.detail || '语音合成失败');
     }
     logTts({
       kind: 'tts',
       status: 'done',
       action: 'preview',
-      voice: voiceName,
-      gender,
+      engine: picked.engine,
+      voice: picked.id,
+      gender: picked.gender,
       chars: text.length,
       bytes: r.wav.length,
       synthMs: r.synthMs ?? Date.now() - started,
+      cached: !!r.cached,
     });
     res.writeHead(200, {
-      'content-type': 'audio/wav',
+      'content-type': r.mime || 'audio/wav',
       'content-length': r.wav.length,
       'cache-control': 'no-store',
     });
@@ -1379,12 +1458,21 @@ export function createServer({ config, logger, getPortFallback = null }) {
     } catch {
       return sendJsonError(res, 400, 'bad_request', '请求体不是合法 JSON');
     }
-    // Kokoro 音色名要校验，避免写入无法使用的值
+    // 音色是统一 ID（<引擎>:<音色>）。空串表示"跟随性别"，允许。
     const raw = body && typeof body === 'object' ? { ...body } : {};
     if (typeof raw.voice === 'string' && raw.voice.trim()) {
-      if (!KOKORO_VOICES.some((v) => v.name === raw.voice.trim())) {
-        return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${raw.voice}`);
+      const v = raw.voice.trim();
+      const parsed = parseVoiceId(v);
+      if (!parsed) {
+        return sendJsonError(res, 400, 'bad_request', `音色格式不正确（应为「引擎:音色」）: ${v}`);
       }
+      if (parsed.engine === 'kokoro' && !KOKORO_VOICES.some((x) => x.name === parsed.voice)) {
+        return sendJsonError(res, 400, 'bad_request', `未知的 Kokoro 音色: ${parsed.voice}`);
+      }
+      if (parsed.engine === 'deepseek' && !DEEPSEEK_VOICES.some((x) => x.id === parsed.voice)) {
+        return sendJsonError(res, 400, 'bad_request', `未知的 DeepSeek 音色: ${parsed.voice}`);
+      }
+      raw.voice = parsed.id;
     }
     const next = saveVoice(hit.slug, raw);
     logger.append({ kind: 'config', status: 'updated', slug: hit.slug, action: 'voice', voiceEnabled: next.enabled, gender: next.gender, voice: next.voice || null });
@@ -2369,6 +2457,9 @@ export function createServer({ config, logger, getPortFallback = null }) {
         if (normPath === '/api/tts/install' && req.method === 'POST') return await handleTtsInstall(req, res);
         if (normPath === '/api/tts/install' && req.method === 'GET') return handleTtsInstallStatus(req, res);
         if (normPath === '/api/tts/preview' && req.method === 'POST') return await handleTtsPreview(req, res);
+        if (normPath === '/api/tts/cloud/test' && req.method === 'POST') return await handleTtsCloudTest(req, res);
+        const mCache = normPath.match(/^\/api\/npcs\/([^/]+)\/tts-cache$/);
+        if (mCache && req.method === 'DELETE') return handleClearTtsCache(req, res, mCache[1]);
         const mtts = normPath.match(/^\/api\/tts\/audio\/([^/]+)$/);
         if (mtts && req.method === 'GET') return await handleTtsAudio(req, res, mtts[1], url);
         const mvoice = normPath.match(/^\/api\/npcs\/([^/]+)\/voice$/);

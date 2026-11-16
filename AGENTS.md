@@ -206,9 +206,11 @@ WorldApartProject/
 │  │  ├─ voice.js             # 系统语音枚举（10min 缓存）、音色解析、逐 NPC 设置、性别判定
 │  │  ├─ synth.js             # Windows：PowerShell + WinRT 合成（并发 2 / 20s 超时 / LRU / 可 kill）
 │  │  ├─ kokoro.js            # Kokoro：sherpa-onnx 子进程合成（单并发 / 180s 超时 / LRU）
+│  │  ├─ cloud.js             # 云端引擎：DeepSeek TTS / 流式 WAV 修复 / 磁盘缓存
+│  │  ├─ engine.js            # 引擎注册表：统一音色 ID `<引擎>:<音色>`、清单聚合、按 ID 派发
 │  │  ├─ install.js           # Kokoro 下载器（hf-mirror + GitHub 镜像 / 断点续传 / SHA-256）
 │  │  ├─ util.js              # 共用：临时目录、WAV 校验、数值归一化
-│  │  └─ index.js             # 门面：选引擎 → 清洗 → 选音色 → 合成；失败只报错，不换音色
+│  │  └─ index.js             # 门面：清洗 → 按音色 ID 派发 → 合成；失败只报错，不换音色
 │  └─ memory/
 │     ├─ store.js             # 每 NPC 数据目录、state、对话追加、原文快照、逐 NPC 提示词
 │     ├─ inject.js            # 长期记忆 / 外置设定提示词注入文本组装
@@ -325,6 +327,17 @@ data/  或  data_test/
   现在音色或引擎取不到就报错跳过本条朗读（409 `voice_unavailable` / `engine_unavailable`），
   只在用户从没选过音色时才按性别自动挑。严格性 24 项 + 正常路径 14 项回归通过
   （见 [docs/tts.md](docs/tts.md) §19）。
+- 0.20.0：**云端引擎 + 统一音色 + 性别判定修复**。
+  · 音色统一为 `<引擎>:<音色>`，男声可用本地、女声可用云端，**混搭不再需要额外结构**；
+    `tts.engine` 与 `tts.kokoro.voice*` 退休并自动迁移（`voice.json` 旧裸值一并升级）。
+  · 新增 **DeepSeek 云端引擎**（`stella` 海星 / `tide` 暗潮）：上游 Provider 是 DeepSeek 时
+    **自动复用**其地址与 Key，否则用独立配置；结果缓存在 `data/npcs/<slug>/tts-cache/`
+    （文件名只含 hash，不含台词）。云端失败**不回落本地**。
+  · 修掉「流式 WAV」的坑：DeepSeek 返回的 `RIFF`/`data` 长度是 `0xFFFFFFFF` 占位，
+    不修则播放器一律拒收。
+  · **性别判定修复**：改用游戏下发的 `- **身份**：女` 字段（21/21 覆盖），
+    删掉不可靠的代词词频——旧算法把李清月、索雅都误判成男声。
+  · 验证：云端 22 项 + 混搭 22 项 + 真实 DeepSeek 9 项 + 性别 21 项，全通过。
 
 > 逐条验证证据、修过的缺陷与排障手册见 [docs/verification-log.md](docs/verification-log.md)。
 

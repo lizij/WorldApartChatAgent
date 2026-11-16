@@ -1134,3 +1134,189 @@ tts-engines/kokoro/model.int8.onnx         114,202,993 B (108.91 MiB)  ← .giti
 
 正常路径回归 **14 项全通过**（Kokoro 已安装、音色都有效）：windows/kokoro 音频都 200 且
 字节不同、试听正常、NPC 详情无 problem、静音 204 / 过期 404 语义不变。
+
+
+---
+
+## 20. 云端引擎与统一音色（0.20.0）
+
+### 20.1 为什么改数据模型
+
+0.19.x 做不到「男声用本地、女声用云端」：`tts.engine` 是全局单选，音色只是裸名字。
+0.20.0 把音色统一成 **`<引擎>:<音色>`**，配置收拢成一行，天然支持混搭：
+
+```json
+"tts": {
+  "voices": {
+    "male":   "kokoro:zm_yunxi",     // 本地
+    "female": "deepseek:stella"      // 云端
+  }
+}
+```
+
+`tts.engine` 与 `tts.kokoro.voiceMale/voiceFemale` **退休**，只作为迁移来源。
+迁移在 `ConfigStore` 构造与每次 `update()` 时执行（`normalizeTts()`），幂等。
+
+`voice.json` 的旧裸值同样升级（`normalizeVoiceId()`）：旧版只有 Kokoro 会用它，
+所以 `zf_xiaoxiao` / `zf_xiaoyi` / `zm_yunxi` 归到 `kokoro:`，其余裸名归到 `windows:`。
+**这一步不做的话，`zm_yunxi` 会被当成 Windows 语音名而永久失效。**
+
+### 20.2 引擎注册表
+
+`src/tts/engine.js` 汇总全部音色，前端据此渲染分组下拉：
+
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 统一 ID，`<engine>:<voice>` |
+| `engine` / `engineLabel` | `windows` / `kokoro` / `deepseek` |
+| `kind` | `local` / `cloud` |
+| `available` / `note` | 不可用时**保留在列表里并置灰**，`note` 说明原因 |
+
+界面文案：`【引擎】【本地/云端】名称`，例：`【DeepSeek】【云端】海星`。
+
+### 20.3 DeepSeek 云端引擎
+
+**音色只有两个**（官方定义）：`stella`（海星，女）、`tide`（暗潮，男）。
+
+**配置来源自动判定**（`resolveCloudConfig()`）：
+
+| 上游 Provider | 行为 |
+| --- | --- |
+| hostname 精确等于 `api.deepseek.com` | **自动复用**其 baseUrl 与 API Key，界面显示「已就绪（复用上游配置）」 |
+| 不是，但填了独立 Key | 用独立配置，显示「已就绪（独立配置）」 |
+| 不是，且没填 | 音色置灰，提示去配置 |
+
+不做反代/子域匹配——反代是否支持 TTS 无法确定。
+
+**请求与响应**：`POST {baseUrl}/v1/tools/tts`，`{text, voice_id, format:'wav', filter_markdown:true}`。
+
+**必须修 WAV 头**：DeepSeek 是流式返回，`RIFF` 与 `data` 的长度字段都是 `0xFFFFFFFF` 占位。
+`System.Media.SoundPlayer` 会直接报「不是有效的波形文件」。`repairStreamingWav()`
+按实际字节回填两个字段——**这一步不做的话音频一概播不出来**。
+
+**不支持 rate/pitch**：官方无对应参数，界面会说明。
+
+实测（2026-11-13，真实 Key）：首音 0.7~1.3 秒，48 KB/秒（24 kHz/16 bit/mono），
+两个音色均 200，WAV 头修复后长度正确。
+
+**内容审核实测**：文档写的 `400 Content Exists Risk` 对所有测试文本均未触发（10/10 放行），
+**不能依赖它当安全网**。
+
+### 20.4 磁盘缓存
+
+路径 `data/npcs/<slug>/tts-cache/<sha1 前16位>.wav`：
+
+- 文件名只含 hash，**不出现任何台词文本**
+- key 含引擎与音色，换音色不串音
+- **不设上限**（按玩家要求），命中时刷新 mtime 以便将来清理
+- 命中时 `cached: true`，日志标注、不重复计费
+- `DELETE /api/npcs/:slug/tts-cache` 可清空；NPC 详情页有按钮
+
+### 20.5 失败处理
+
+**云端失败绝不回落本地**——这是 0.19.2 红线的延伸：
+
+| reason | HTTP | 含义 |
+| --- | --- | --- |
+| `cloud_auth_failed` | 409 | Key 无效 |
+| `cloud_content_risk` | 409 | 内容审核 |
+| `cloud_rate_limited` / `cloud_busy` | 409 | 限速 / 繁忙 |
+| `cloud_timeout` | 409 | 超时 |
+| `cloud_failed` | 500 | 其他，日志带响应体前 200 字 |
+
+执行日志里显示完整原因；界面只提示「本条已跳过，详情见执行日志」。
+
+### 20.6 接口
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/tts/voices` | 统一音色清单 + 各引擎状态（`engines.deepseek.{ready,source,reason}`） |
+| `PUT /api/config` | 校验 `voices.*` 为 `engine:voice` 且音色在清单内；校验云端配置 |
+| `GET /api/tts/audio/:rid` | 透传真实 `mime` |
+| `POST /api/tts/preview` | 接受统一 ID |
+| `POST /api/tts/cloud/test` | 连通性测试（可用未保存的临时配置） |
+| `DELETE /api/npcs/:slug/tts-cache` | 清空云端语音缓存 |
+
+**校验顺序的坑**：用户第一次配置云端时，会在同一个 PUT 里同时提交 Key 与云端音色。
+校验音色可用性必须用**合并后的临时配置**（`deepMerge(config.get(), {tts:{cloud}})`），
+否则会出现「明明填了 Key 却报未配置」的死锁。
+
+### 20.7 隐私声明（重要变更）
+
+0.19.x 写的是「语音合成与朗读全在本机完成，不联网」。接入云端后**不再成立**：
+
+> 本地引擎（Windows / Kokoro）完全离线；若为音色选择云端引擎，台词文本会发送给对应服务商并按字符计费。默认全部使用本地音色。
+
+工坊描述、README、AGENTS.md 都已同步。
+
+### 20.8 验证（0.20.0）
+
+| 套件 | 项数 | 内容 |
+| --- | --- | --- |
+| 云端测试（`test-cloud.mjs`） | 22 | 清单含三引擎、混搭保存、WAV 头修复、云端失败不回落的 409、非法值 400 |
+| 混搭测试（`test-mix.mjs`） | 22 | Kokoro+DeepSeek 混搭、缓存命中（调用次数不变）、缓存文件名是 hash、清空缓存、男声走 Kokoro 不碰云端 |
+| 真实 DeepSeek | 9 | 自动复用上游、两音色 200、WAV 头正确、连通性测试 |
+| 性别判定 | 21 | 全部 21 个真实 NPC 与「身份」字段一致 |
+
+---
+
+## 21. 性别判定修复（0.20.0）
+
+### 21.1 根因：两个信号都失效
+
+**① 最强信号完全没被识别。** 游戏下发的权威字段是 `- **身份**：女，人`，
+而旧正则要求「**性别**：女」或「**女性**」——直接漏掉。
+
+**② 代词词频在真实数据里必然误判。** 实测：
+
+| NPC | 她 | 他 | 旧判定 | 实际 |
+| --- | --- | --- | --- | --- |
+| 李清月 | 5 | 9 | **男（错）** | 女 |
+| 索雅 | 5 | 7 | **男（错）** | 女 |
+
+那些「他」全部指向**玩家或关系人物**（「他这句只讲了个大道理」「索雅自他年幼时便常照看他」）。
+NPC 材料里必然大量出现「他」，**代词计数这个手段在新数据结构下不可用，已删除**。
+
+### 21.2 新的优先级
+
+| 优先级 | 依据 | 覆盖率 |
+| --- | --- | --- |
+| ① | `- **身份**：女/男`（不带 NPC 名字的行） | **21/21 = 100%** |
+| ② | `{本NPC名}（npc:NNN）：…基础：女/…` | 4/21 |
+| ③ | 角色自述里主语明确的性别句 | 兜底 |
+| ④ | 称谓关键词（少女/公子…） | 兜底 |
+| ⑤ | 无线索 → `defaultGender` + `decided:false` | 兜底 |
+
+**防串人**：角色属性里会混进其他 NPC 的档案行（李清月档案里有「宓青苓（npc:190802）：…」），
+所以 ② 必须用 `startsWith(slug + '（npc:')` 精确匹配；① 必须跳过所有带 `（npc:` 的行。
+
+### 21.3 界面
+
+- NPC 详情显示「性别判定依据：角色属性写明「身份：女」」
+- 若该 NPC 被手工强制过性别，显示提示：「旧版本的性别判定有误，建议改回自动判定」
+
+### 21.4 验证
+
+对 `releases/data` 的 **21 个真实 NPC** 逐个断言，与「身份」字段**21/21 一致**
+（李清月、索雅均为女；程砺为男）。
+
+
+### 20.9 复查补修：把「不静默换音色」下沉到引擎层（0.20.0）
+
+0.19.2 的红线只在**门面层**（`speak` / `pickVoice`）执行。0.20.0 复查发现引擎内部
+还有两处会被绕过：
+
+| 位置 | 原行为 | 现在 |
+| --- | --- | --- |
+| `src/tts/kokoro.js` | 音色名不认识 → 静默换成 `zf_xiaoxiao` | 返回 `voice_unavailable`，不合成 |
+| `src/tts/synth.js` | PowerShell 里找不到指定音色 → 静默沿用系统默认语音 | 脚本 `exit 3` 并写 `WFC_TTS_NO_VOICE:`，JS 侧映射为 `voice_unavailable` |
+
+这样即使将来有人在门面层之前直接调引擎，也不会出现「选了 A 却念成 B」。
+
+另一个小修：云端磁盘缓存的 key 补上 `baseUrl`——用户把云端指向别的兼容服务时，
+不会命中旧服务留下的音频。
+
+**验证**（隔离档位）：
+- Windows 层传 `Definitely Not A Voice` → `voice_unavailable` + 明确 detail
+- Kokoro 层传 `no_such_speaker` → `voice_unavailable`；正常音色仍出 59 KB 音频
+- 综合回归 19 项全通过（含混搭、缓存命中、不回落、缓存名 hash、清缓存）

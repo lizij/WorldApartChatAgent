@@ -40,7 +40,12 @@ $null = [Windows.Media.SpeechSynthesis.SpeechSynthesizer, Windows.Media.SpeechSy
 $synth = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::new()
 if ($spec.voice) {
   $v = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices | Where-Object { $_.DisplayName -eq $spec.voice } | Select-Object -First 1
-  if ($v) { $synth.Voice = $v }
+  if (-not $v) {
+    # 红线：指定的音色找不到就报错，绝不静默沿用系统默认语音（见 docs/tts.md §19）
+    [Console]::Error.WriteLine("WFC_TTS_NO_VOICE:" + $spec.voice)
+    exit 3
+  }
+  $synth.Voice = $v
 }
 if ($null -ne $spec.rate) { $synth.Options.SpeakingRate = [double]$spec.rate }
 if ($null -ne $spec.pitch) { $synth.Options.AudioPitch = [double]$spec.pitch }
@@ -143,8 +148,19 @@ export async function synthesize(job) {
         if (child) inflight.delete(child);
         if (err) {
           const killed = err.killed || err.signal === 'SIGTERM' || err.signal === 'SIGKILL';
-          const e = new Error(killed ? 'tts_timeout' : 'tts_powershell_failed');
-          e.detail = String(stderr || err.message || '').slice(0, 200);
+          // 脚本内主动 exit 3 表示「指定的音色不存在」——必须报错，不能当成普通失败后回落到别的音色
+          const noVoice = /WFC_TTS_NO_VOICE:/.test(String(stderr || ''));
+          const e = new Error(killed ? 'tts_timeout' : noVoice ? 'voice_unavailable' : 'tts_powershell_failed');
+          if (noVoice) {
+            // 只取标记行，PowerShell 的 stderr 里还会混入 CLIXML 噪声
+            const line = String(stderr)
+              .split(/\r?\n/)
+              .find((l) => l.includes('WFC_TTS_NO_VOICE:')) || '';
+            const name = line.split('WFC_TTS_NO_VOICE:')[1]?.trim() || '';
+            e.detail = `系统里没有音色「${name}」，程序不会改用其它音色。`;
+          } else {
+            e.detail = String(stderr || err.message || '').slice(0, 200);
+          }
           return reject(e);
         }
         resolve();
@@ -184,9 +200,11 @@ export async function synthesize(job) {
     while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
     return { ok: true, wav: buf, synthMs: Date.now() - started };
   } catch (err) {
+    const known = ['tts_timeout', 'tts_stopping', 'voice_unavailable'];
+    const m = String(err?.message || '');
     return {
       ok: false,
-      reason: err?.message === 'tts_timeout' ? 'tts_timeout' : err?.message === 'tts_stopping' ? 'tts_stopping' : 'tts_powershell_failed',
+      reason: known.includes(m) ? m : 'tts_powershell_failed',
       detail: err?.detail || null,
       synthMs: Date.now() - started,
     };

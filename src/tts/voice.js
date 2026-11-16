@@ -106,9 +106,32 @@ export function readVoice(slug) {
     gender: raw.gender === 'male' || raw.gender === 'female' ? raw.gender : 'auto',
     rate: numOrNull(raw.rate),
     pitch: numOrNull(raw.pitch),
-    // Kokoro 专用：具体音色名（zf_xiaoxiao 等）；留空则按 gender 取全局默认
-    voice: typeof raw.voice === 'string' ? raw.voice.trim().slice(0, 40) : '',
+    // 音色：统一 ID（<引擎>:<音色>）；旧版的裸值在 normalizeVoiceId 里升级
+    voice: normalizeVoiceId(raw.voice),
   };
+}
+
+// —— 旧格式升级 ——
+
+/** Kokoro 的说话人名（与 kokoro.js 的 KOKORO_VOICES 一致）。 */
+const KOKORO_NAMES = new Set(['zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunxi']);
+/** DeepSeek 的音色 id。 */
+const DEEPSEEK_IDS = new Set(['stella', 'tide']);
+
+/**
+ * 把 `voice.json` 里的旧值升级成统一 ID。
+ *
+ * 0.19.x 的 voice.voice 存的是裸音色名，只有 Kokoro 会用它，
+ * 所以旧值必须按 Kokoro 归属——否则 `zm_yunxi` 会被当成 Windows 语音名而永久失效。
+ */
+export function normalizeVoiceId(raw) {
+  const s = typeof raw === 'string' ? raw.trim().slice(0, 200) : '';
+  if (!s) return '';
+  if (s.includes(':')) return s; // 已经是统一 ID
+  if (KOKORO_NAMES.has(s)) return `kokoro:${s}`;
+  if (DEEPSEEK_IDS.has(s)) return `deepseek:${s}`;
+  // 其余裸名按 Windows 系统语音处理（0.19.x 的 Windows 音色就是这个格式）
+  return `windows:${s}`;
 }
 
 export function saveVoice(slug, patch = {}) {
@@ -125,7 +148,7 @@ export function saveVoice(slug, patch = {}) {
     next.pitch = v === null ? null : Math.round(Math.min(Math.max(v, 0.5), 2) * 100) / 100;
   }
   if (patch.voice !== undefined) {
-    next.voice = typeof patch.voice === 'string' ? patch.voice.trim().slice(0, 40) : '';
+    next.voice = normalizeVoiceId(patch.voice);
   }
   // 全默认值时不落盘，保持目录干净
   const isDefault =
@@ -152,8 +175,8 @@ export function saveVoice(slug, patch = {}) {
 const FEMALE_HINTS = ['少女', '女子', '姑娘', '仙子', '师娘', '娘亲', '母亲', '小姐', '夫人', '妇人'];
 const MALE_HINTS = ['少年', '男子', '公子', '老汉', '老丈', '父亲', '师兄', '师弟', '少爷', '夫君'];
 
-const EXPLICIT_FEMALE = /(性别|性別)\s*[：:]\s*女|女(性|子之身)|女修|女性/;
-const EXPLICIT_MALE = /(性别|性別)\s*[：:]\s*男|男(性|子之身)|男修|男性/;
+/** 「- **身份**：女，人」/「- 性别：男」——游戏下发的权威字段。 */
+const PERSONA_LINE = /^[-*]?\s*\**\s*(?:身份|性别|性別)\**\s*[：:]\s*(女|男)/;
 
 function countOccurrences(hay, needle) {
   if (!needle) return 0;
@@ -167,13 +190,94 @@ function countOccurrences(hay, needle) {
 }
 
 /**
+ * 从「角色属性」块里读游戏下发的权威性别字段。
+ *
+ * 两种写法都要认（实测 21/21 个 NPC 都有，覆盖率 100%）：
+ *   ① `- **身份**：女，人`           —— 不带名字，就是本角色自己的
+ *   ② `李清月（npc:190102）：…基础：女/…` —— 带名字，必须按 slug 精确匹配
+ *
+ * 为什么要按名字过滤：角色属性里会混进其他 NPC 的档案行
+ * （如李清月的档案里带有「宓青苓（npc:190802）：…基础：女/…」），
+ * 不过滤会把别人的性别算到自己头上。
+ *
+ * @returns {{gender:'male'|'female', reason:string}|null}
+ */
+function personaGenderOf(attrText, slug) {
+  if (!attrText) return null;
+
+  // ① 无名字的「身份/性别」行（优先级最高）
+  for (const raw of attrText.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    // 带「X（npc:NNN）：」的行交给 ② 处理，这里跳过，避免误读别人的档案
+    if (/（npc:\d+）/.test(line)) continue;
+    const m = line.match(PERSONA_LINE);
+    if (m) {
+      // 文案里只保留干净的中文，别把 markdown 星号带出去
+      return {
+        gender: m[1] === '男' ? 'male' : 'female',
+        reason: `角色属性写明「身份：${m[1]}」`,
+      };
+    }
+  }
+
+  // ② 带名字的档案行：「<slug>（npc:NNN）：…基础：女/…」
+  if (slug) {
+    const prefix = slug + '（npc:';
+    for (const raw of attrText.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line.startsWith(prefix)) continue;
+      const m = line.match(/基础[：:]\s*(女|男)/);
+      if (m) {
+        return { gender: m[1] === '男' ? 'male' : 'female', reason: `人物档案「${slug}」基础为${m[1]}` };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * 从角色自身的叙述文本里找「她是…」「作为女子」这类显式声明。
+ *
+ * 只认**主语是角色自己**的句子：材料里大量出现「他这句…」「他自己下过山」
+ * 这类指代玩家的句子，不加限制会直接把女角色判成男。
+ */
+function narrativeGenderOf(own, slug) {
+  if (!own) return null;
+  const sentences = own
+    .split(/[。！？\n]/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  let fem = 0;
+  let male = 0;
+  for (const s of sentences) {
+    // 只统计主语为角色名/「她」「他」开头的句子，且长度合理
+    const isSubjectFem = new RegExp(`^(?:${slug}|她)`).test(s);
+    const isSubjectMale = new RegExp(`^(?:${slug}|他)`).test(s);
+    if (isSubjectFem && /她|女|姑娘|少女|女子/.test(s)) fem += 1;
+    if (isSubjectMale && /他|男|少年|男子/.test(s)) male += 1;
+  }
+  if (fem > male) return { gender: 'female', reason: `角色自述里偏向女性 ${fem} 句 / 男性 ${male} 句` };
+  if (male > fem) return { gender: 'male', reason: `角色自述里偏向男性 ${male} 句 / 女性 ${fem} 句` };
+  return null;
+}
+
+/**
  * 从 intake 判定 NPC 性别。
  *
- * 只用「角色本身」的材料：
- *   - voice.json 显式设置（由调用方优先处理）
- *   - ## 角色属性 / 【角色属性】（外貌、善恶、性格）
- *   - ## 角色设定 / ## 角色背景
- * **绝不**读取 `- 性别：` 行或 state.lastGame.player（那是玩家）。
+ * 优先级（越靠前越可信）：
+ *   ① 角色属性里的「身份/性别」字段（21/21 覆盖，最可靠）
+ *   ② 人物档案里按 slug 精确匹配的「基础：女/男」
+ *   ③ 角色自述里主语明确的性别句
+ *   ④ 称谓关键词（少女/公子…）
+ *   ⑤ 兜底 defaultGender（decided=false）
+ *
+ * **刻意不用代词词频**：实测李清月 she=5/he=9、索雅 she=5/he=7，
+ * 那些「他」全都指向玩家或其他男性角色，计数法在这种数据结构下必然误判。
+ *
+ * 绝不读取 `- 性别：` 里属于**玩家**的那一份（identify.js 的 extractGameState 取的是玩家性别）。
  *
  * @returns {{gender:'male'|'female', reason:string, decided:boolean}}
  */
@@ -190,137 +294,29 @@ export function detectGender(slug) {
 
   const sections = sectionsOf(raw);
   const facts = extractFactBlocks(raw);
-  const own = [
-    sections['角色属性'] || '',
-    facts['角色属性'] || '',
-    sections['角色设定'] || '',
-    sections['角色背景'] || '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const attr = [sections['角色属性'] || '', facts['角色属性'] || ''].filter(Boolean).join('\n');
+  const own = [sections['角色设定'] || '', sections['角色背景'] || ''].filter(Boolean).join('\n');
 
-  if (!own.trim()) return { gender: 'female', reason: 'intake 里没有角色设定/属性，使用默认音色', decided: false };
+  // ① / ② 游戏下发的权威字段
+  const persona = personaGenderOf(attr, slug);
+  if (persona) return { gender: persona.gender, reason: persona.reason, decided: true };
 
-  // ① 显式声明（仅限角色自身材料里出现）
-  const mf = own.match(EXPLICIT_FEMALE);
-  const mm = own.match(EXPLICIT_MALE);
-  if (mf && !mm) return { gender: 'female', reason: `角色属性里写明「${mf[0]}」`, decided: true };
-  if (mm && !mf) return { gender: 'male', reason: `角色属性里写明「${mm[0]}」`, decided: true };
+  // ③ 角色自述（主语必须是角色自己）
+  const narrative = narrativeGenderOf(own, slug);
+  if (narrative) return { gender: narrative.gender, reason: narrative.reason, decided: true };
 
-  // ② 称谓关键词（只在外貌/性格这类角色自身描述里找）
-  const look = [sections['角色属性'] || '', facts['角色属性'] || '', sections['角色背景'] || ''].join('\n');
-  const fem = FEMALE_HINTS.reduce((n, h) => n + countOccurrences(look, h), 0);
-  const male = MALE_HINTS.reduce((n, h) => n + countOccurrences(look, h), 0);
+  if (!attr.trim() && !own.trim()) {
+    return { gender: 'female', reason: 'intake 里没有角色设定/属性，使用默认音色', decided: false };
+  }
+
+  // ④ 称谓关键词（只在外貌/性格这类角色自身描述里找）
+  const fem = FEMALE_HINTS.reduce((n, h) => n + countOccurrences(attr, h), 0);
+  const male = MALE_HINTS.reduce((n, h) => n + countOccurrences(attr, h), 0);
   if (fem > male) return { gender: 'female', reason: `角色描述里女性称谓 ${fem} 处 / 男性 ${male} 处`, decided: true };
   if (male > fem) return { gender: 'male', reason: `角色描述里男性称谓 ${male} 处 / 女性 ${fem} 处`, decided: true };
 
-  // ③ 代词词频（只在角色自身材料里数，避免把玩家描述算进来）
-  const she = countOccurrences(own, '她');
-  const he = countOccurrences(own, '他');
-  if (she > he) return { gender: 'female', reason: `角色描述里「她」×${she}、「他」×${he}`, decided: true };
-  if (he > she) return { gender: 'male', reason: `角色描述里「他」×${he}、「她」×${she}`, decided: true };
-  if (she && he) return { gender: 'female', reason: `「她」「他」各 ${she} 次，按默认处理`, decided: false };
-  return { gender: 'female', reason: '没有性别线索，使用默认音色', decided: false };
-}
-
-/**
- * 解析某个 NPC 最终要用的音色。
- * 优先级：全局 male/female → 同性别第一个。
- *
- * **红线：用户显式选过音色名，就只认那一个。** 找不到时返回 `problem`
- * 而不是换成别的音色——静默换人会让玩家在对话中途听到另一个人的声音，
- * 比没有声音更糟（见 docs/tts.md §19）。
- * 只有「用户从没指定音色」时才按性别自动挑。
- *
- * @returns {Promise<{gender:string, voiceName:string|null, reason:string, available:Array, problem:{code:string, detail:string}|null}>}
- */
-export async function resolveVoice(slug, cfg) {
-  const voices = await listVoices();
-  const globalVoices = (cfg && cfg.voices) || {};
-  const setting = slug ? readVoice(slug) : { ...DEFAULT_VOICE, gender: 'auto' };
-
-  let gender;
-  let reason;
-  if (setting.gender === 'male' || setting.gender === 'female') {
-    gender = setting.gender;
-    reason = `该 NPC 指定为${gender === 'male' ? '男声' : '女声'}`;
-  } else {
-    const d = slug ? detectGender(slug) : { gender: (cfg && cfg.defaultGender) || 'female', reason: '使用默认音色', decided: false };
-    gender = d.gender;
-    reason = d.reason;
-    // 判定不出来时跟全局兜底（detectGender 固定回 female，这里改按 defaultGender）
-    if (!d.decided && (cfg && cfg.defaultGender) === 'male') {
-      gender = 'male';
-      reason = d.reason + '（按默认男声）';
-    }
-  }
-
-  // 全局男/女声默认。只要用户配了名字，就必须用它；配了却找不到 → 报错，不替换。
-  const configured = String((gender === 'male' ? globalVoices.male : globalVoices.female) || '').trim();
-  const genderWord = gender === 'male' ? '男' : '女';
-  if (configured) {
-    if (voices.some((v) => v.name === configured)) {
-      return {
-        gender,
-        voiceName: configured,
-        reason: `${reason}；使用你选择的音色「${configured}」`,
-        available: voices,
-        problem: null,
-      };
-    }
-    return {
-      gender,
-      voiceName: null,
-      reason,
-      available: voices,
-      problem: {
-        code: 'voice_unavailable',
-        detail:
-          `你选择的${genderWord}声音色「${configured}」已不在系统语音列表里` +
-          '（可能被卸载，或更换了系统语言包）。程序不会改用其它音色；' +
-          '请到「实验功能 → 音色」重新选择。',
-      },
-    };
-  }
-
-  // 以下都是「用户没指定音色名」的情形，可以按性别自动挑。
-  const sameGender = voices.find((v) => v.gender === gender);
-  if (sameGender) {
-    return { gender, voiceName: sameGender.name, reason: `${reason}；按性别自动选中`, available: voices, problem: null };
-  }
-
-  if (!voices.length) {
-    return {
-      gender,
-      voiceName: null,
-      reason: `${reason}；系统里没有可用的中文语音`,
-      available: voices,
-      problem: { code: 'tts_no_voice', detail: '系统里没有可用的中文语音。' },
-    };
-  }
-
-  // 系统里没有该性别的语音。若这个性别是玩家为角色**显式指定的**，
-  // 跨性别替换同样算"换了音色"，必须报错；自动判定出来的性别则允许兜底。
-  if (setting.gender === 'male' || setting.gender === 'female') {
-    return {
-      gender,
-      voiceName: null,
-      reason,
-      available: voices,
-      problem: {
-        code: 'voice_unavailable',
-        detail: `你为该角色指定了${genderWord}声，但系统里没有${genderWord}声语音。程序不会改用其它性别的声音。`,
-      },
-    };
-  }
-
-  return {
-    gender,
-    voiceName: voices[0].name,
-    reason: `${reason}；系统里没有${genderWord}声，按第一个语音兜底`,
-    available: voices,
-    problem: null,
-  };
+  // ⑤ 兜底：不猜，交给调用方按 defaultGender 处理并提示
+  return { gender: 'female', reason: '没有可用的性别线索，使用默认音色', decided: false };
 }
 
 /** 该 NPC 是否参与自动朗读（逐 NPC 静音开关）。 */

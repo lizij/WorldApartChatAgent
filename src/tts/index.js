@@ -1,40 +1,52 @@
 /**
- * TTS 门面：选引擎 → 清洗文本 → 选音色 → 合成。
+ * TTS 门面：清洗文本 → 解析音色 → 按音色 ID 派发到对应引擎 → 合成。
  * server.js 只调这一层，不直接碰各引擎细节。
  *
- * 引擎：
- *   windows  — 系统自带 WinRT 语音（默认，零下载、极快）
- *   kokoro   — sherpa-onnx + Kokoro-82M int8（需下载约 156 MB，音质最好但慢）
+ * 引擎（音色 ID 形如 `<engine>:<voice>`）：
+ *   windows  — 系统自带 WinRT 语音（零下载、极快）
+ *   kokoro   — sherpa-onnx + Kokoro-82M int8（需下载约 159 MB，音质最好但慢）
+ *   deepseek — 云端 DeepSeek TTS（联网、按字符计费、首音约 1 秒）
  *
- * 任一引擎不可用或合成失败时**都不换音色**：直接返回错误（reason 见下），
+ * 任一引擎不可用或合成失败时**都不换音色**：直接返回错误，
  * 由管理页提示玩家重选或修引擎。静默换成另一个人的声音比没声音更糟。
  * 见 docs/tts.md §19「选定的音色不得被替换」。
  */
 import { buildSpeechText } from './text.js';
-import { listVoices, resolveVoice, readVoice, saveVoice, isVoiceEnabled, detectGender } from './voice.js';
+import { readVoice, saveVoice, isVoiceEnabled, detectGender, listVoices } from './voice.js';
 import * as windowsEngine from './synth.js';
 import * as kokoroEngine from './kokoro.js';
+import * as cloudEngine from './cloud.js';
+import * as registry from './engine.js';
 import { install as installKokoro, status as kokoroStatus, installState } from './install.js';
 
-export { listVoices, resolveVoice, readVoice, saveVoice, isVoiceEnabled, buildSpeechText };
+export { listVoices, readVoice, saveVoice, isVoiceEnabled, buildSpeechText, detectGender };
 export { installKokoro, kokoroStatus, installState };
 export const KOKORO_VOICES = kokoroEngine.KOKORO_VOICES;
+export const DEEPSEEK_VOICES = cloudEngine.DEEPSEEK_VOICES;
 export const isKokoroInstalled = kokoroEngine.isInstalled;
 export const synthesizeKokoro = kokoroEngine.synthesize;
 /** Windows 引擎的合成入口（试听/调试用；日常朗读走 speak()）。 */
 export const synthesize = windowsEngine.synthesize;
 
-export const ENGINE_IDS = ['windows', 'kokoro'];
+export const ENGINE_IDS = registry.ENGINE_IDS;
+export const ENGINE_LABEL = registry.ENGINE_LABEL;
+export const ENGINE_KIND = registry.ENGINE_KIND;
+export const parseVoiceId = registry.parseVoiceId;
+export const makeVoiceId = registry.makeVoiceId;
+export const listAllVoices = registry.listAllVoices;
+export const resolveVoiceById = registry.resolveVoiceById;
+export const engineStatus = registry.engineStatus;
+export const synthesizeById = registry.synthesizeById;
 
+/** 云端引擎：配置解析、连通性测试、缓存管理。 */
+export const resolveCloudConfig = cloudEngine.resolveCloudConfig;
+export const testCloudConnection = cloudEngine.testConnection;
+export const clearCloudCache = cloudEngine.clearCache;
+export const cloudCacheStats = cloudEngine.cacheStats;
+
+/** 兼容旧调用方：取某引擎的显示名。 */
 export function engineLabel(id) {
-  return id === 'kokoro' ? 'Kokoro（离线神经语音）' : 'Windows 内置语音';
-}
-
-/** 当前实际可用/被选中的引擎。 */
-export function activeEngine(cfg) {
-  const want = cfg?.tts?.engine === 'kokoro' ? 'kokoro' : 'windows';
-  if (want === 'kokoro' && kokoroEngine.isInstalled()) return 'kokoro';
-  return 'windows';
+  return registry.ENGINE_LABEL[id] || id || 'Windows';
 }
 
 export function shutdown() {
@@ -47,56 +59,84 @@ export function reset() {
   kokoroEngine.reset();
 }
 
-/** Kokoro 下按性别选音色：逐 NPC 指定优先，其次 detectGender，最后全局默认。 */
-function kokoroGenderOf(slug, t) {
+/** 该 NPC 的性别与依据：逐 NPC 指定优先，其次 detectGender，最后 defaultGender。 */
+function genderOf(slug, t) {
   const setting = slug ? readVoice(slug) : { gender: 'auto' };
   if (setting.gender === 'male' || setting.gender === 'female') {
-    return { gender: setting.gender, reason: '该 NPC 指定' };
+    return { gender: setting.gender, reason: `该 NPC 指定为${setting.gender === 'male' ? '男声' : '女声'}` };
   }
-  if (!slug) return { gender: t?.defaultGender === 'male' ? 'male' : 'female', reason: '默认音色' };
+  if (!slug) return { gender: t?.defaultGender === 'male' ? 'male' : 'female', reason: '使用默认音色' };
   const d = detectGender(slug);
   if (d.decided) return { gender: d.gender, reason: d.reason };
-  return { gender: t?.defaultGender === 'male' ? 'male' : 'female', reason: d.reason };
+  return {
+    gender: t?.defaultGender === 'male' ? 'male' : 'female',
+    reason: d.reason + (t?.defaultGender === 'male' ? '（按默认男声）' : '（按默认女声）'),
+  };
 }
 
-/** Kokoro 音色（逐 NPC 指定优先，其次按性别取全局默认）。 */
-function kokoroVoiceFor(slug, cfg, gender) {
-  const per = slug ? readVoice(slug) : null;
-  const explicit = per && typeof per.voice === 'string' ? per.voice.trim() : '';
+/**
+ * 选出某个 NPC 最终要用的音色（统一 ID）。
+ *
+ * **红线**：逐 NPC 指定 / 全局男女声如果配了具体音色，就只认那一个；
+ * 拿不到就报错，不换音色、不换引擎。只有从没配过时才按性别自动挑。
+ *
+ * @returns {Promise<{voice:object|null, gender:string, reason:string, problem:object|null}>}
+ */
+export async function pickVoice(slug, cfg) {
+  const t = cfg?.tts || {};
+  const g = genderOf(slug, t);
+  const gender = g.gender;
+  const setting = slug ? readVoice(slug) : null;
+
+  // ① 逐 NPC 显式指定
+  const explicit = setting && typeof setting.voice === 'string' ? setting.voice.trim() : '';
   if (explicit) {
-    const v = kokoroEngine.voiceByName(explicit);
-    if (v) return { voice: v, problem: null };
-    // 用户显式指定过 Kokoro 音色，但名字不认识（改过 config / 引擎版本变化）→ 报错，不替换
-    return {
-      voice: null,
-      problem: {
-        code: 'voice_unavailable',
-        detail: `该角色指定的 Kokoro 音色「${explicit}」不可用。程序不会改用其它音色；请到「NPC 记忆」页重新选择。`,
-      },
-    };
+    const r = await registry.resolveVoiceById(explicit, cfg);
+    if (r.problem) {
+      return {
+        voice: null,
+        gender,
+        reason: g.reason,
+        problem: {
+          code: r.problem.code,
+          detail: r.problem.detail.replace('请重新选择', '请到「NPC 记忆」页重新选择'),
+        },
+      };
+    }
+    return { voice: r.voice, gender: r.voice.gender, reason: `${g.reason}；该角色指定了音色`, problem: null };
   }
-  const k = cfg?.tts?.kokoro || {};
-  const want = gender === 'male' ? k.voiceMale : k.voiceFemale;
-  if (want) {
-    const v = kokoroEngine.voiceByName(want);
-    if (v) return { voice: v, problem: null };
-    return {
-      voice: null,
-      problem: {
-        code: 'voice_unavailable',
-        detail: `你配置的 Kokoro ${gender === 'male' ? '男' : '女'}声音色「${want}」不可用。程序不会改用其它音色；请到「实验功能 → 音色」重新选择。`,
-      },
-    };
-  }
-  // 用户没配 Kokoro 音色：按性别自动挑（这不是"用户选择了音色"）
-  const fallback = kokoroEngine.voiceByName(gender === 'male' ? 'zm_yunxi' : 'zf_xiaoxiao');
-  return { voice: fallback, problem: null };
-}
 
-/** 供 server 复用同一套严格解析（NPC 详情页要显示"音色已失效"）。 */
-export const pickKokoroVoice = kokoroVoiceFor;
-export const kokoroGenderFor = kokoroGenderOf;
-export const resolveWindowsVoice = resolveVoice;
+  // ② 全局男/女声
+  const configured = String((gender === 'male' ? t.voices?.male : t.voices?.female) || '').trim();
+  if (configured) {
+    const r = await registry.resolveVoiceById(configured, cfg);
+    if (r.problem) {
+      return {
+        voice: null,
+        gender,
+        reason: g.reason,
+        problem: {
+          code: r.problem.code,
+          detail: r.problem.detail.replace('请重新选择', '请到「实验功能 → 音色」重新选择'),
+        },
+      };
+    }
+    return { voice: r.voice, gender, reason: `${g.reason}；使用你选择的音色「${r.voice.label}」`, problem: null };
+  }
+
+  // ③ 从没配过：按性别自动挑（这不算"替换用户的选择"）
+  const all = await registry.listAllVoices(cfg);
+  const pick = all.find((v) => v.gender === gender && v.available) || all.find((v) => v.available);
+  if (!pick) {
+    return {
+      voice: null,
+      gender,
+      reason: g.reason,
+      problem: { code: 'tts_no_voice', detail: '没有任何可用的音色，请先在「实验功能 → 音色」里配置。' },
+    };
+  }
+  return { voice: pick, gender, reason: `${g.reason}；自动选中第一个可用音色`, problem: null };
+}
 
 /**
  * 朗读一条 NPC 回复。
@@ -112,119 +152,57 @@ export async function speak({ raw, slug = null, cfg, mode = null }) {
     maxChars: t.maxChars || 600,
   });
   if (!prepared.ok) {
-    return { ok: false, reason: prepared.reason, chars: 0, text: '', mode: prepared.mode, voiceName: null, gender: 'female', engine: 'windows' };
+    return {
+      ok: false,
+      reason: prepared.reason,
+      chars: 0,
+      text: '',
+      mode: prepared.mode,
+      voiceId: null,
+      voiceName: null,
+      gender: 'female',
+      engine: 'windows',
+    };
   }
 
   const per = slug ? readVoice(slug) : null;
   const rate = Number.isFinite(per?.rate) ? per.rate : Number(t.rate);
   const pitch = Number.isFinite(per?.pitch) ? per.pitch : Number(t.pitch);
 
-  const wanted = t.engine === 'kokoro' ? 'kokoro' : 'windows';
-  // 用户选了 Kokoro 就必须是 Kokoro。引擎缺失时**不**改用系统语音，
-  // 否则等于把用户选的音色偷偷换掉（见 docs/tts.md §19）。
-  if (wanted === 'kokoro' && !kokoroEngine.isInstalled()) {
+  const picked = await pickVoice(slug, cfg);
+  if (picked.problem) {
     return {
       ok: false,
-      reason: 'engine_unavailable',
-      detail:
-        '你选择了 Kokoro 音色，但没找到 Kokoro 引擎（tts-engines/kokoro）。' +
-        '程序不会改用系统语音；请重新安装引擎，或到「实验功能 → 音色」改选系统语音。',
+      reason: picked.problem.code,
+      detail: picked.problem.detail,
       synthMs: 0,
       chars: prepared.chars,
       text: prepared.text,
       mode: prepared.mode,
+      voiceId: null,
       voiceName: null,
-      gender: t?.defaultGender === 'male' ? 'male' : 'female',
-      engine: 'kokoro',
+      gender: picked.gender,
+      engine: null,
       ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
     };
   }
 
-  if (wanted === 'kokoro') {
-    const g = kokoroGenderOf(slug, t);
-    const picked = kokoroVoiceFor(slug, cfg, g.gender);
-    if (picked.problem) {
-      return {
-        ok: false,
-        reason: picked.problem.code,
-        detail: picked.problem.detail,
-        synthMs: 0,
-        chars: prepared.chars,
-        text: prepared.text,
-        mode: prepared.mode,
-        voiceName: null,
-        gender: g.gender,
-        engine: 'kokoro',
-        ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
-      };
-    }
-    const v = picked.voice;
-    const r = await kokoroEngine.synthesize({
-      text: prepared.text,
-      voice: v.name,
-      rate: Number.isFinite(rate) ? rate : 1,
-      threads: t.kokoro?.threads,
-    });
-    if (r.ok) {
-      return {
-        ...r,
-        chars: prepared.chars,
-        text: prepared.text,
-        mode: prepared.mode,
-        voiceName: v.name,
-        voiceLabel: v.label,
-        gender: v.gender,
-        engine: 'kokoro',
-        ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
-      };
-    }
-    // Kokoro 合成失败同样**不**回退系统语音：换了音色比没声音更糟。
-    return {
-      ...r,
-      ok: false,
-      reason: r.reason || 'kokoro_failed',
-      chars: prepared.chars,
-      text: prepared.text,
-      mode: prepared.mode,
-      voiceName: v.name,
-      voiceLabel: v.label,
-      gender: v.gender,
-      engine: 'kokoro',
-      ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
-    };
-  }
-
-  const resolved = await resolveVoice(slug, t);
-  if (resolved.problem) {
-    return {
-      ok: false,
-      reason: resolved.problem.code,
-      detail: resolved.problem.detail,
-      synthMs: 0,
-      chars: prepared.chars,
-      text: prepared.text,
-      mode: prepared.mode,
-      voiceName: null,
-      gender: resolved.gender,
-      engine: 'windows',
-      ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
-    };
-  }
-  const r = await windowsEngine.synthesize({
-    text: prepared.text,
-    voice: resolved.voiceName,
-    rate: Number.isFinite(rate) ? rate : null,
-    pitch: Number.isFinite(pitch) ? pitch : null,
-  });
+  const v = picked.voice;
+  const r = await registry.synthesizeById({ voice: v, text: prepared.text, slug, cfg, rate, pitch });
 
   return {
     ...r,
+    ok: !!r.ok,
     chars: prepared.chars,
     text: prepared.text,
     mode: prepared.mode,
-    voiceName: resolved.voiceName,
-    gender: resolved.gender,
-    engine: 'windows',
+    voiceId: v.id,
+    voiceName: v.voice,
+    voiceLabel: v.label,
+    engine: v.engine,
+    engineLabel: v.engineLabel,
+    kind: v.kind,
+    gender: v.gender,
     ...(prepared.fallback ? { fallback: prepared.fallback } : {}),
   };
 }

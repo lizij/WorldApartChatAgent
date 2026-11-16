@@ -176,33 +176,39 @@ export function defaults() {
     // 详见 docs/tts.md。
     tts: {
       enabled: false,
-      // 引擎：windows（系统自带语音，零下载、极快）/ kokoro（离线神经语音，需下载约 156MB）
-      // kokoro 未安装或合成失败时报错跳过本条，不换引擎（见 docs/tts.md §19）
-      engine: 'windows',
-      // all = 全部内容；dialogue = 只读引号内的对白（没有引号时自动回退 all）
+      // 朗读范围：all = 全部内容；dialogue = 只读引号内对白（没有引号时自动回退 all）
       readMode: 'all',
       // all 模式下是否跳过（括号动作）
       skipActions: true,
-      // 全局男/女音色名（Windows 引擎用）。配了就必须用它：
-      // 取不到时报错跳过本条朗读，不会退到其它语音（见 docs/tts.md §19）。
-      // 注意：首次运行若系统里没有这两个名字，界面会标注「已失效，请重选」。
-      voices: { male: 'Microsoft Kangkang', female: 'Microsoft Huihui' },
+      // 全局男/女音色，统一 ID：<引擎>:<音色>
+      //   windows:Microsoft Huihui / kokoro:zf_xiaoyi / deepseek:stella
+      // 配了就必须用它：取不到时报错跳过本条朗读，不会换引擎或换音色（见 docs/tts.md §19）。
+      voices: { male: 'windows:Microsoft Kangkang', female: 'windows:Microsoft Huihui' },
       // 性别判定失败时用哪个音色
       defaultGender: 'female',
-      // 合成参数（逐 NPC 可覆盖）
+      // 合成参数（逐 NPC 可覆盖；云端引擎不支持 rate/pitch，会被忽略）
       rate: 1.0,
       pitch: 1.0,
       // 播放音量：只在页面 <audio>.volume 生效，不参与合成与缓存
       volume: 0.8,
       // 单条朗读字数上限（超出按句截断）
       maxChars: 600,
-      // Kokoro 引擎参数
+      // Kokoro 引擎参数（音色已并入 tts.voices，这里只剩引擎自身参数）
       kokoro: {
-        // 中文音色（说话人编号见 src/tts/kokoro.js；只保留实测可用的 3 个）
-        voiceFemale: 'zf_xiaoxiao',
-        voiceMale: 'zm_yunxi',
         // 合成线程数：实测 4 最优（8 无提升，16+ 反而变慢）
         threads: 4,
+      },
+      // 云端引擎。目前只支持 DeepSeek（见 docs/tts.md §20）。
+      cloud: {
+        deepseek: {
+          // auto   = 上游 Provider 是 DeepSeek 就直接复用它的地址与 Key；
+          //          不是则用下面的 baseUrl/apiKey；两者都没有就提示去配置
+          // manual = 始终使用下面的 baseUrl/apiKey
+          mode: 'auto',
+          baseUrl: 'https://api.deepseek.com',
+          apiKey: '',
+          timeoutMs: 60000,
+        },
       },
     },
   };
@@ -300,6 +306,60 @@ function normalizeMemory(cfg) {
 }
 
 /**
+ * TTS 音色结构迁移（0.19.x → 0.20.0）：把「引擎 + 各引擎独立音色」收拢为统一的
+ * `<engine>:<voice>` 音色 ID，这样男声可以用本地引擎、女声用云端引擎。
+ *
+ * 幂等：已经带 `:` 前缀的直接跳过。
+ */
+export function normalizeTts(cfg) {
+  const t = cfg?.tts;
+  if (!t || typeof t !== 'object') return false;
+  let changed = false;
+  const hasPrefix = (s) => typeof s === 'string' && s.includes(':');
+  const v = t.voices && typeof t.voices === 'object' ? t.voices : {};
+
+  if (!hasPrefix(v.male) || !hasPrefix(v.female)) {
+    const legacyEngine = t.engine === 'kokoro' ? 'kokoro' : 'windows';
+    const k = t.kokoro || {};
+    const pick = (gender) => {
+      const cur = String(v[gender] || '').trim();
+      if (hasPrefix(cur)) return cur;
+      if (legacyEngine === 'kokoro') {
+        const kv = gender === 'male' ? k.voiceMale : k.voiceFemale;
+        return `kokoro:${kv || (gender === 'male' ? 'zm_yunxi' : 'zf_xiaoxiao')}`;
+      }
+      // 裸名一律视作 Windows 系统语音
+      return cur ? `windows:${cur}` : '';
+    };
+    t.voices = {
+      male: pick('male') || 'windows:Microsoft Kangkang',
+      female: pick('female') || 'windows:Microsoft Huihui',
+    };
+    changed = true;
+  }
+
+  // 旧字段只作为迁移来源，迁完就删，避免双来源（见 docs/contributing.md）
+  if ('engine' in t) {
+    delete t.engine;
+    changed = true;
+  }
+  if (t.kokoro && typeof t.kokoro === 'object') {
+    for (const k of ['voiceMale', 'voiceFemale']) {
+      if (k in t.kokoro) {
+        delete t.kokoro[k];
+        changed = true;
+      }
+    }
+  }
+  // 云端配置兜底（老配置没有这一段）
+  if (!t.cloud || typeof t.cloud !== 'object') {
+    t.cloud = { deepseek: { mode: 'auto', baseUrl: 'https://api.deepseek.com', apiKey: '', timeoutMs: 60000 } };
+    changed = true;
+  }
+  return changed;
+}
+
+/**
  * 配置仓库：启动时加载/生成，运行期可热更新（管理页保存后即时生效）。
  */
 export class ConfigStore {
@@ -347,6 +407,7 @@ export class ConfigStore {
 
     this.cfg = deepMerge(d, user);
     if (normalizeMemory(this.cfg)) migrated = true;
+    if (normalizeTts(this.cfg)) migrated = true;
     this.firstRun = !existed;
     if (!existed || migrated) this.persist();
   }
@@ -359,6 +420,7 @@ export class ConfigStore {
   update(patch) {
     this.cfg = deepMerge(this.cfg, patch);
     normalizeMemory(this.cfg);
+    normalizeTts(this.cfg);
     this.persist();
     return this.cfg;
   }

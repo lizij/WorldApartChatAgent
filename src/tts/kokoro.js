@@ -132,7 +132,15 @@ export async function synthesize(job) {
   if (!text) return { ok: false, reason: 'empty_text' };
   if (!isInstalled()) return { ok: false, reason: 'kokoro_not_installed' };
 
-  const voice = voiceByName(job.voice) || voiceByName('zf_xiaoxiao');
+  const voice = voiceByName(job.voice);
+  // 红线：不认识的音色就报错，绝不静默换成 zf_xiaoxiao（见 docs/tts.md §19）
+  if (!voice) {
+    return {
+      ok: false,
+      reason: 'voice_unavailable',
+      detail: `Kokoro 音色「${job.voice || '(未指定)'}」不可用。程序不会改用其它音色；请重新选择。`,
+    };
+  }
   const threads = Math.min(Math.max(Number(job.threads) || 4, 1), 8);
   // rate 越大越快；长度缩放与它相反
   const rate = Number.isFinite(Number(job.rate)) && Number(job.rate) > 0 ? Number(job.rate) : 1;

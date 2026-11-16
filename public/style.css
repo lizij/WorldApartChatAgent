@@ -54,7 +54,7 @@ main { flex: 1; overflow: hidden; }
 .grid { display: grid; gap: 14px; }
 .grid.two { grid-template-columns: 1fr 1fr; }
 .grid.three { grid-template-columns: repeat(3, 1fr); gap: 10px; align-items: end; }
-@media (max-width: 900px) { .grid.two, .grid.three { grid-template-columns: 1fr; } }
+@media (max-width: 780px) { .grid.two, .grid.three { grid-template-columns: 1fr; } }
 
 .card {
   background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
@@ -65,12 +65,80 @@ main { flex: 1; overflow: hidden; }
 .kv label, .grid label { font-size: 12px; color: var(--muted); }
 .kv .row { display: flex; gap: 8px; }
 .kv .row.right { justify-content: flex-end; margin-top: 8px; }
+
+/* ——— 卡片头部：标题 + 标签同排 ——— */
+.card-head {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap;
+}
+.card-head h2 { margin: 0; }
+/* 重排后的卡片用 stack 统一纵向间距（原 .kv 的 gap 只覆盖旧结构） */
+.stack > * + * { margin-top: 12px; }
+.card-head .tags { display: flex; gap: 4px; }
+.card-head .tags .tag { margin-left: 0; }
+
+/* ——— 主开关行：一眼可见的启用项 ——— */
+.switch {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 12px; margin-bottom: 12px;
+  background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  cursor: pointer; user-select: none;
+}
+.switch:hover { border-color: var(--accent); }
+.switch input[type="checkbox"] { width: 15px; height: 15px; margin: 0; cursor: pointer; flex: none; }
+.switch > span { font-size: 13px; color: var(--text); font-weight: 500; }
+.switch > em { font-size: 12px; color: var(--muted); font-style: normal; margin-left: auto; }
+
+/* ——— 折叠区：高级设置 / 说明 ——— */
+.fold {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.fold > summary {
+  cursor: pointer; list-style: none; user-select: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 0 3px; font-size: 12px; color: var(--muted);
+}
+.fold > summary::-webkit-details-marker { display: none; }
+.fold > summary::before {
+  content: ''; width: 0; height: 0; flex: none;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .15s ease;
+}
+.fold[open] > summary::before { transform: rotate(90deg); }
+.fold > summary:hover { color: var(--text); }
+.fold-body { display: flex; flex-direction: column; gap: 10px; padding: 6px 0 2px; }
+.fold.nested { margin-top: 8px; border-top: 1px dashed var(--border); }
+
+/* ——— 卡片底部：保存按钮 ——— */
+.card-foot {
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding-top: 12px; border-top: 1px solid var(--border);
+}
+
+/* 带标签的独立字段块（如缓存机制） */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > label { font-size: 12px; color: var(--muted); }
+
+/* 勾选项列表：统一间距，避免与输入框混排时参差 */
+.checks { display: flex; flex-direction: column; gap: 6px; }
+.checks .check { font-size: 12px; color: var(--muted); }
 input[type="text"], input:not([type]), input[type="password"], input[type="number"] {
   width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); padding: 7px 10px; font-size: 13px; outline: none;
 }
 input:focus { border-color: var(--accent); }
 input[readonly] { color: var(--muted); }
+/* 只读状态条：弱化边框与底色，明确区别于可编辑输入框 */
+input[readonly].status {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--border);
+  color: var(--text);
+  cursor: default;
+}
 textarea {
   width: 100%; background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   color: var(--text); padding: 7px 10px; font-size: 13px; outline: none; resize: vertical;
@@ -85,18 +153,23 @@ textarea:focus { border-color: var(--accent); }
 [hidden] { display: none !important; }
 .check.small { font-size: 12px; color: var(--muted); }
 /* 重写缓存机制：单选行，title 提供悬浮说明 */
-.cache-modes { display: flex; flex-direction: column; gap: 6px; }
+.cache-modes { display: flex; gap: 8px; flex-wrap: wrap; }
 .cache-mode {
-  display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
   background: var(--panel2); border: 1px solid var(--border); border-radius: 6px;
   font-size: 13px; color: var(--text); cursor: help;
+  flex: 1 1 0; min-width: 140px;
 }
 .cache-mode:hover { border-color: var(--accent); }
-.cache-mode input { margin-top: 2px; cursor: pointer; }
+.cache-mode input { margin: 0; cursor: pointer; flex: none; }
 .cache-mode span { line-height: 1.4; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.hint:empty, .saved-hint:empty { display: none; }
 .muted { color: var(--muted); font-weight: normal; font-size: 12px; }
 .saved-hint { color: var(--green); font-size: 12px; align-self: center; }
+/* 状态色：云端引擎「已就绪 / 未配置」等 */
+.saved-hint.ok { color: var(--green); }
+.saved-hint.warn { color: var(--yellow); }
 
 .btn {
   background: var(--panel2); border: 1px solid var(--border); color: var(--text);
@@ -163,6 +236,24 @@ select:focus { border-color: var(--accent); }
 .tts-bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, #3a6ea5, #5b9bd6); transition: width .3s ease; }
 /* 语音朗读卡片里的小节标题（音色等） */
 .tts-sub { font-size: 13px; color: var(--accent); margin: 14px 0 4px; font-weight: 600; }
+/* 云端引擎配置区：默认折叠，避免卡片过长 */
+#ttsCloudDetails { margin: 6px 0 2px; }
+.tts-details-summary {
+  cursor: pointer; font-size: 12px; color: var(--muted);
+  padding: 6px 0; user-select: none; list-style: none;
+  display: flex; align-items: center; gap: 6px;
+}
+.tts-details-summary::-webkit-details-marker { display: none; }
+.tts-details-summary::before {
+  content: '';
+  width: 0; height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform .15s ease;
+}
+#ttsCloudDetails[open] .tts-details-summary::before { transform: rotate(90deg); }
+.tts-details-summary:hover { color: var(--text); }
 /* 执行日志里的朗读按钮：紧跟时间与日志编号。
    注意不能加 margin-left:auto —— 右侧留白由 .log-expand 的 auto 负责，
    两个 auto 会把空白平分，按钮就跑到中间去了。 */
